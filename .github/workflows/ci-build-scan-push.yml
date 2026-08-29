@@ -1,6 +1,7 @@
 name: CI - Helm Build Scan Push
 
 on:
+  workflow_dispatch:  "Run workflow"      # ✅ Enables button
   push:
     branches: ["master"]
     paths:
