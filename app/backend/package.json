@@ -1,0 +1,13 @@
+{
+  "name": "three-tier-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Backend for the Helm/EKS GitHub Actions lab",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "pg": "^8.16.3"
+  }
+}

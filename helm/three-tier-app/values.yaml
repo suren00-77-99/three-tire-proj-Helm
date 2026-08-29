@@ -1,0 +1,52 @@
+nameOverride: ""
+fullnameOverride: ""
+
+frontend:
+  replicaCount: 2
+  image:
+    repository: "REPLACE_FRONTEND_ECR"
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  service:
+    type: LoadBalancer
+    port: 80
+    targetPort: 8080
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+backend:
+  replicaCount: 2
+  image:
+    repository: "REPLACE_BACKEND_ECR"
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  service:
+    port: 8080
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+
+database:
+  image:
+    repository: "postgres"
+    tag: "17-alpine"
+    pullPolicy: IfNotPresent
+  service:
+    port: 5432
+  database: appdb
+  username: appuser
+  password: "change-me-in-github-values"
+  storage:
+    size: 2Gi
+    storageClassName: ""
+
+imagePullSecrets: []

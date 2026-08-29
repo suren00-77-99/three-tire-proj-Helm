@@ -1,0 +1,12 @@
+frontend:
+  image:
+    repository: "REPLACE_FRONTEND_ECR"
+    tag: "latest"
+
+backend:
+  image:
+    repository: "REPLACE_BACKEND_ECR"
+    tag: "latest"
+
+database:
+  password: "change-me"

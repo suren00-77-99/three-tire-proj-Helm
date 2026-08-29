@@ -1,0 +1,33 @@
+suite: three-tier chart
+templates:
+  - templates/frontend-deployment.yaml
+  - templates/backend-deployment.yaml
+  - templates/postgres-statefulset.yaml
+tests:
+  - it: creates two frontend replicas
+    template: templates/frontend-deployment.yaml
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 2
+  - it: creates two backend replicas
+    template: templates/backend-deployment.yaml
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 2
+  - it: runs postgres as a single replica
+    template: templates/postgres-statefulset.yaml
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 1
+  - it: uses the configured frontend image
+    template: templates/frontend-deployment.yaml
+    set:
+      frontend.image.repository: 123456789012.dkr.ecr.ap-south-1.amazonaws.com/frontend
+      frontend.image.tag: abc123
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: 123456789012.dkr.ecr.ap-south-1.amazonaws.com/frontend:abc123

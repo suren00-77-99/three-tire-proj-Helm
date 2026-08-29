@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "three-tier-app.fullname" . }}-test"
+  namespace: three-tier
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: smoke
+      image: busybox:1.37
+      command:
+        - sh
+        - -c
+        - >
+          wget -qO- http://{{ include "three-tier-app.fullname" . }}-backend:8080/health
+          && wget -qO- http://{{ include "three-tier-app.fullname" . }}-frontend:80/health

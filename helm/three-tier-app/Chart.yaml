@@ -1,0 +1,6 @@
+apiVersion: v2
+name: three-tier-app
+description: Three-tier frontend/backend/PostgreSQL application for an EKS GitHub Actions lab
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
