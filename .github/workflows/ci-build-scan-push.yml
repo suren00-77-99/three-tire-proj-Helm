@@ -81,7 +81,8 @@ jobs:
         with:
           role-to-assume: ${{ env.AWS_GITHUB_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-
+          role-session-name: GitHubActions-${{ github.run_id }}
+          
       - name: Verify AWS identity
         run: aws sts get-caller-identity
 
