@@ -2,45 +2,83 @@ name: CI - Helm Build Scan Push
 
 on:
   push:
-    branches: ["master"]
+    branches:
+      - master
     paths:
       - "app/**"
       - "helm/**"
       - ".github/workflows/ci-build-scan-push.yml"
+
   pull_request:
-    branches: ["master"]
+    branches:
+      - master
     paths:
       - "app/**"
       - "helm/**"
       - ".github/workflows/ci-build-scan-push.yml"
+
   workflow_dispatch:
 
+# ============================================================
+# GitHub Actions permissions
+# ============================================================
 permissions:
   contents: read
   id-token: write
 
+# ============================================================
+# Global environment variables
+# ============================================================
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
   ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
   AWS_GITHUB_ROLE_ARN: ${{ vars.AWS_GITHUB_ROLE_ARN }}
 
+# ============================================================
+# JOBS
+# ============================================================
 jobs:
+
+  # ==========================================================
+  # STAGE 1
+  # HELM LINT + TEMPLATE + UNIT TEST
+  # ==========================================================
   helm-lint-test:
+
     name: Helm lint and offline tests
+
     runs-on: ubuntu-latest
+
     steps:
+
+      # --------------------------------------------------------
+      # Checkout source code
+      # --------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v5
 
+
+      # --------------------------------------------------------
+      # Install Helm
+      # --------------------------------------------------------
       - name: Setup Helm
         uses: azure/setup-helm@v4
         with:
           version: v3.18.6
 
-      - name: Helm lint
-        run: helm lint helm/three-tier-app
 
+      # --------------------------------------------------------
+      # Helm lint
+      # --------------------------------------------------------
+      - name: Helm lint
+        run: |
+          helm lint helm/three-tier-app
+
+
+      # --------------------------------------------------------
+      # Helm template
+      # --------------------------------------------------------
       - name: Helm template
         run: |
           helm template three-tier-app helm/three-tier-app \
@@ -48,79 +86,257 @@ jobs:
             --set frontend.image.tag=test \
             --set backend.image.repository=test/backend \
             --set backend.image.tag=test \
-            --set database.password=lab-password > /tmp/rendered.yaml
+            --set database.password=lab-password \
+            > /tmp/rendered.yaml
+
           test -s /tmp/rendered.yaml
 
+
+      # --------------------------------------------------------
+      # Install helm-unittest
+      # --------------------------------------------------------
       - name: Install helm-unittest
-        run: helm plugin install https://github.com/helm-unittest/helm-unittest.git --version 1.0.3
+        run: |
+          helm plugin install \
+            https://github.com/helm-unittest/helm-unittest.git \
+            --version 1.0.3
 
+
+      # --------------------------------------------------------
+      # Helm unit tests
+      # --------------------------------------------------------
       - name: Helm unit tests
-        run: helm unittest helm/three-tier-app
+        run: |
+          helm unittest helm/three-tier-app
 
+
+      # --------------------------------------------------------
+      # Job summary
+      # --------------------------------------------------------
+      - name: Helm job summary
+        run: |
+          {
+            echo "### Helm Validation"
+            echo ""
+            echo "✅ Helm lint passed"
+            echo "✅ Helm template passed"
+            echo "✅ Helm unit tests passed"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+
+  # ==========================================================
+  # STAGE 2
+  # BUILD + SCAN + PUSH
+  # ==========================================================
   build-scan-push:
+
     name: Build, Trivy scan and push
-    needs: helm-lint-test
+
+    needs:
+      - helm-lint-test
+
+    # Build and push only for push/manual execution.
+    # Pull requests perform Helm validation only.
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+
     runs-on: ubuntu-latest
+
     strategy:
       fail-fast: true
+
       matrix:
         include:
+
+          # --------------------------------------------------
+          # FRONTEND
+          # --------------------------------------------------
           - name: frontend
             context: ./app/frontend
             repository: three-tier-frontend
+
+          # --------------------------------------------------
+          # BACKEND
+          # --------------------------------------------------
           - name: backend
             context: ./app/backend
             repository: three-tier-backend
 
+
     steps:
+
+      # ======================================================
+      # STAGE 2.1
+      # CHECKOUT
+      # ======================================================
       - name: Checkout
         uses: actions/checkout@v5
 
+
+      # ======================================================
+      # STAGE 2.2
+      # SETUP NODE.JS
+      #
+      # Only required for backend dependency validation.
+      # ======================================================
+      - name: Setup Node.js
+        if: matrix.name == 'backend'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/backend/package-lock.json
+
+
+      # ======================================================
+      # STAGE 2.3
+      # INSTALL BACKEND DEPENDENCIES
+      #
+      # npm ci is preferred when package-lock.json exists.
+      # Fallback to npm install prevents CI failure when the
+      # lock file has not yet been created.
+      # ======================================================
+      - name: Install backend dependencies
+        if: matrix.name == 'backend'
+        working-directory: app/backend
+        run: |
+          if [ -f package-lock.json ]; then
+            echo "package-lock.json found"
+            echo "Running npm ci..."
+            npm ci
+          else
+            echo "WARNING: package-lock.json not found"
+            echo "Running npm install..."
+            npm install
+          fi
+
+
+      # ======================================================
+      # STAGE 2.4
+      # VERIFY BACKEND DEPENDENCIES
+      # ======================================================
+      - name: Verify backend dependencies
+        if: matrix.name == 'backend'
+        working-directory: app/backend
+        run: |
+          npm ls
+
+
+      # ======================================================
+      # STAGE 2.5
+      # AWS OIDC AUTHENTICATION
+      #
+      # No AWS access key or secret key is stored in GitHub.
+      # GitHub receives a short-lived AWS role session.
+      # ======================================================
       - name: Configure AWS credentials with OIDC
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ env.AWS_GITHUB_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: GitHubActions-${{ github.run_id }}
-          
-      - name: Verify AWS identity
-        run: aws sts get-caller-identity
 
+
+      # ======================================================
+      # STAGE 2.6
+      # VERIFY AWS IDENTITY
+      # ======================================================
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+
+
+      # ======================================================
+      # STAGE 2.7
+      # ENSURE ECR REPOSITORY EXISTS
+      # ======================================================
       - name: Ensure ECR repository exists
         run: |
-          aws ecr describe-repositories --repository-names "${{ matrix.repository }}" >/dev/null 2>&1 || \
+          aws ecr describe-repositories \
+            --repository-names "${{ matrix.repository }}" \
+            >/dev/null 2>&1 || \
           aws ecr create-repository \
             --repository-name "${{ matrix.repository }}" \
             --image-scanning-configuration scanOnPush=true \
             --image-tag-mutability IMMUTABLE
 
+
+      # ======================================================
+      # STAGE 2.8
+      # LOGIN TO ECR
+      # ======================================================
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+
+      # ======================================================
+      # STAGE 2.9
+      # BUILD DOCKER IMAGE
+      #
+      # --pull:
+      #   Always checks for the latest version of the base image.
+      #
+      # --no-cache:
+      #   Ensures old vulnerable image layers aren't reused.
+      # ======================================================
       - name: Build image
         env:
           IMAGE_URI: ${{ env.ECR_REGISTRY }}/${{ matrix.repository }}:${{ github.sha }}
-        run: docker build --pull -t "$IMAGE_URI" "${{ matrix.context }}"
 
+        run: |
+          echo "Building:"
+          echo "$IMAGE_URI"
+
+          docker build \
+            --pull \
+            --no-cache \
+            -t "$IMAGE_URI" \
+            "${{ matrix.context }}"
+
+
+      # ======================================================
+      # STAGE 2.10
+      # SETUP TRIVY
+      # ======================================================
       - name: Setup Trivy
         uses: aquasecurity/setup-trivy@e07451d2e059ed86c2870430ea286b3a9e0bf241
         with:
           version: v0.72.0
           cache: true
 
-      - name: Trivy vulnerability scan
+
+      # ======================================================
+      # STAGE 2.11
+      # TRIVY IMAGE VULNERABILITY SCAN
+      #
+      # HIGH and CRITICAL vulnerabilities with available fixes
+      # cause the pipeline to fail.
+      #
+      # The image will NOT be pushed if this step fails.
+      # ======================================================
+      - name: Trivy image vulnerability scan
         env:
           IMAGE_URI: ${{ env.ECR_REGISTRY }}/${{ matrix.repository }}:${{ github.sha }}
+
         run: |
+          echo "Scanning image:"
+          echo "$IMAGE_URI"
+
           trivy image \
+            --scanners vuln \
             --severity HIGH,CRITICAL \
             --ignore-unfixed \
             --exit-code 1 \
             --format table \
             "$IMAGE_URI"
 
-      - name: Trivy filesystem scan
+
+      # ======================================================
+      # STAGE 2.12
+      # TRIVY FILESYSTEM + SECRET SCAN
+      #
+      # Scans application source before pushing image.
+      # ======================================================
+      - name: Trivy filesystem and secret scan
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: fs
@@ -129,22 +345,64 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: 1
+          format: table
 
+
+      # ======================================================
+      # STAGE 2.13
+      # PUSH APPROVED IMAGE
+      #
+      # This step executes ONLY if all previous steps passed.
+      # ======================================================
       - name: Push approved image to ECR
         env:
           IMAGE_URI: ${{ env.ECR_REGISTRY }}/${{ matrix.repository }}:${{ github.sha }}
-        run: |
-          docker push "$IMAGE_URI"
-          docker image inspect "$IMAGE_URI" --format='digest={{index .RepoDigests 0}}' || true
 
+        run: |
+          echo "Security checks passed."
+          echo "Pushing image:"
+          echo "$IMAGE_URI"
+
+          docker push "$IMAGE_URI"
+
+
+      # ======================================================
+      # STAGE 2.14
+      # VERIFY IMAGE
+      # ======================================================
+      - name: Verify pushed image
+        env:
+          IMAGE_URI: ${{ env.ECR_REGISTRY }}/${{ matrix.repository }}:${{ github.sha }}
+
+        run: |
+          echo "ECR image:"
+          echo "$IMAGE_URI"
+
+          aws ecr describe-images \
+            --repository-name "${{ matrix.repository }}" \
+            --image-ids imageTag="${{ github.sha }}"
+
+
+      # ======================================================
+      # STAGE 2.15
+      # JOB SUMMARY
+      # ======================================================
       - name: Job summary
         env:
           IMAGE_URI: ${{ env.ECR_REGISTRY }}/${{ matrix.repository }}:${{ github.sha }}
+
         run: |
           {
-            echo "### ${{ matrix.name }} CI result"
+            echo "### ${{ matrix.name }} CI Result"
             echo ""
-            echo "- Helm lint: passed"
-            echo "- Trivy: passed (HIGH/CRITICAL with fixes gate)"
-            echo "- ECR image: \`$IMAGE_URI\`"
+            echo "✅ Helm validation passed"
+            echo "✅ Dependencies validated"
+            echo "✅ Docker image built"
+            echo "✅ Trivy image scan passed"
+            echo "✅ Trivy filesystem/secret scan passed"
+            echo "✅ Image pushed to ECR"
+            echo ""
+            echo "**Image:** \`$IMAGE_URI\`"
+            echo ""
+            echo "**Commit:** \`${{ github.sha }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
