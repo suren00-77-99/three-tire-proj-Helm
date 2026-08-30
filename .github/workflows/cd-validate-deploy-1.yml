@@ -42,7 +42,7 @@ jobs:
             --query 'cluster.{name:name,status:status,version:version,endpoint:endpoint}' \
             --output table
           aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
-          kubectl version --short
+          kubectl version 
           kubectl get nodes -o wide
           kubectl get storageclass
           echo "status=validated" >> "$GITHUB_OUTPUT"
