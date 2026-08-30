@@ -4,8 +4,8 @@ fullnameOverride: ""
 frontend:
   replicaCount: 2
   image:
-    repository: "REPLACE_FRONTEND_ECR"
-    tag: "latest"
+    repository: "322686612450.dkr.ecr.ap-south-1.amazonaws.com/three-tier-frontend"
+    tag: "509063918762ffd3c8a75c098af5581060719630"
     pullPolicy: IfNotPresent
   service:
     type: LoadBalancer
@@ -22,8 +22,8 @@ frontend:
 backend:
   replicaCount: 2
   image:
-    repository: "REPLACE_BACKEND_ECR"
-    tag: "latest"
+    repository: "322686612450.dkr.ecr.ap-south-1.amazonaws.com/three-tier-backend"
+    tag: "509063918762ffd3c8a75c098af5581060719630"
     pullPolicy: IfNotPresent
   service:
     port: 8080
