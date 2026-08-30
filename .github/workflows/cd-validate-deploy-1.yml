@@ -85,7 +85,7 @@ jobs:
         run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
 
       - name: Ensure namespace exists
-            run: |
+            run:|
               set -euo pipefail
 
               if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
