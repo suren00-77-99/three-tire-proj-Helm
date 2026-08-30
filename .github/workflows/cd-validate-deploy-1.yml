@@ -1,0 +1,212 @@
+name: CD - Validate Cluster and Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Git commit SHA tag produced by CI"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+  AWS_GITHUB_ROLE_ARN: ${{ vars.AWS_GITHUB_ROLE_ARN }}
+  EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
+  NAMESPACE: three-tier
+  RELEASE_NAME: three-tier-app
+
+jobs:
+  validate-cluster:
+    name: Validate manually-created EKS cluster
+    runs-on: ubuntu-latest
+    outputs:
+      cluster_status: ${{ steps.cluster.outputs.status }}
+    steps:
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_GITHUB_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Validate EKS cluster exists
+        id: cluster
+        run: |
+          set -euo pipefail
+          aws eks describe-cluster --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION" \
+            --query 'cluster.{name:name,status:status,version:version,endpoint:endpoint}' \
+            --output table
+          aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+          kubectl version --short
+          kubectl get nodes -o wide
+          kubectl get storageclass
+          echo "status=validated" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Kubernetes API access
+        run: |
+          kubectl auth can-i get pods --all-namespaces
+          kubectl auth can-i create deployments -n "$NAMESPACE" || true
+
+      - name: Cluster summary
+        run: |
+          {
+            echo "## Cluster validation"
+            echo ""
+            echo "| Item | Value |"
+            echo "|---|---|"
+            echo "| Cluster | \`$EKS_CLUSTER_NAME\` |"
+            echo "| Region | \`$AWS_REGION\` |"
+            echo "| Status | validated |"
+            echo "| Nodes |"
+            echo '```text'
+            kubectl get nodes --no-headers
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-frontend:
+    name: Deploy frontend
+    needs: validate-cluster
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_GITHUB_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubeconfig
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+
+      - name: Deploy frontend stage
+        run: |
+          helm upgrade --install "$RELEASE_NAME" helm/three-tier-app \
+            --namespace "$NAMESPACE" --create-namespace \
+            --set frontend.image.repository="$ECR_REGISTRY/three-tier-frontend" \
+            --set frontend.image.tag="${{ inputs.image_tag }}" \
+            --set backend.image.repository="$ECR_REGISTRY/three-tier-backend" \
+            --set backend.image.tag="${{ inputs.image_tag }}" \
+            --set database.password="${{ secrets.DB_PASSWORD }}" \
+            --wait --timeout 5m
+
+          kubectl rollout status deployment/"$RELEASE_NAME-frontend" -n "$NAMESPACE" --timeout=180s
+          kubectl get deployment,service,pod -n "$NAMESPACE" -l app.kubernetes.io/component=frontend
+
+  deploy-backend:
+    name: Deploy backend
+    needs: deploy-frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_GITHUB_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubeconfig
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+
+      - name: Deploy backend stage
+        run: |
+          helm upgrade --install "$RELEASE_NAME" helm/three-tier-app \
+            --namespace "$NAMESPACE" --create-namespace \
+            --set frontend.image.repository="$ECR_REGISTRY/three-tier-frontend" \
+            --set frontend.image.tag="${{ inputs.image_tag }}" \
+            --set backend.image.repository="$ECR_REGISTRY/three-tier-backend" \
+            --set backend.image.tag="${{ inputs.image_tag }}" \
+            --set database.password="${{ secrets.DB_PASSWORD }}" \
+            --wait --timeout 5m
+
+          kubectl rollout status deployment/"$RELEASE_NAME-backend" -n "$NAMESPACE" --timeout=180s
+          kubectl get deployment,service,pod -n "$NAMESPACE" -l app.kubernetes.io/component=backend
+
+  deploy-database:
+    name: Deploy database
+    needs: deploy-backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_GITHUB_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubeconfig
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+
+      - name: Deploy database stage
+        run: |
+          helm upgrade --install "$RELEASE_NAME" helm/three-tier-app \
+            --namespace "$NAMESPACE" --create-namespace \
+            --set frontend.image.repository="$ECR_REGISTRY/three-tier-frontend" \
+            --set frontend.image.tag="${{ inputs.image_tag }}" \
+            --set backend.image.repository="$ECR_REGISTRY/three-tier-backend" \
+            --set backend.image.tag="${{ inputs.image_tag }}" \
+            --set database.password="${{ secrets.DB_PASSWORD }}" \
+            --wait --timeout 5m
+
+          kubectl rollout status statefulset/"$RELEASE_NAME-postgres" -n "$NAMESPACE" --timeout=180s
+          kubectl get statefulset,service,pod,pvc -n "$NAMESPACE" -l app.kubernetes.io/component=database
+
+  verify-and-summary:
+    name: Verify and summarize deployment
+    needs: deploy-database
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_GITHUB_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubeconfig
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+
+      - name: Final Kubernetes checks
+        run: |
+          set -euo pipefail
+          kubectl get nodes -o wide
+          kubectl get all -n "$NAMESPACE"
+          kubectl get pvc -n "$NAMESPACE"
+          helm status "$RELEASE_NAME" -n "$NAMESPACE"
+          helm test "$RELEASE_NAME" -n "$NAMESPACE" --logs
+
+      - name: Write final GitHub Actions summary
+        run: |
+          {
+            echo "# Deployment Summary"
+            echo ""
+            echo "## Cluster"
+            echo "- Name: \`$EKS_CLUSTER_NAME\`"
+            echo "- Region: \`$AWS_REGION\`"
+            echo "- Image tag: \`${{ inputs.image_tag }}\`"
+            echo ""
+            echo "## Kubernetes objects"
+            echo '```text'
+            kubectl get deployment,statefulset,service,pod,pvc -n "$NAMESPACE"
+            echo '```'
+            echo ""
+            echo "## Helm"
+            echo '```text'
+            helm status "$RELEASE_NAME" -n "$NAMESPACE"
+            echo '```'
+            echo ""
+            echo "## Result"
+            echo "### SUCCESSFUL DEPLOYMENT"
+            echo "Frontend, backend and database stages completed and Helm tests passed."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Success message
+        run: echo "SUCCESSFUL DEPLOYMENT - $RELEASE_NAME on cluster $EKS_CLUSTER_NAME"
