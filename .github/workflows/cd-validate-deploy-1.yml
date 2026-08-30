@@ -85,18 +85,17 @@ jobs:
         run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
 
       - name: Ensure namespace exists
-            run:|
-              set -euo pipefail
-
-              if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
-                echo "Namespace '$NAMESPACE' already exists."
-                echo "Using existing namespace."
-              else
-                echo "Namespace '$NAMESPACE' does not exist."
-                echo "Creating namespace..."
-                kubectl create namespace "$NAMESPACE"
-                echo "Namespace '$NAMESPACE' created successfully."
-              fi
+        run: |
+          set -euo pipefail
+          if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
+            echo "Namespace '$NAMESPACE' already exists."
+            echo "Using existing namespace."
+          else
+            echo "Namespace '$NAMESPACE' does not exist."
+            echo "Creating namespace..."
+            kubectl create namespace "$NAMESPACE"
+            echo "Namespace '$NAMESPACE' created successfully."
+          fi
       
       - name: Deploy frontend stage
         run: |
