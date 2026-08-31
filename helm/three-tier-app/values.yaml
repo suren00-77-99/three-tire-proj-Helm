@@ -1,59 +1,113 @@
 nameOverride: ""
+
 fullnameOverride: ""
 
+
+# ============================================================
+# FRONTEND
+# ============================================================
 frontend:
+
   replicaCount: 2
+
   image:
     repository: "322686612450.dkr.ecr.ap-south-1.amazonaws.com/three-tier-frontend"
     tag: "latest"
     pullPolicy: IfNotPresent
+
   service:
     type: LoadBalancer
     port: 80
     targetPort: 8080
+
   resources:
+
     requests:
       cpu: 50m
       memory: 64Mi
+
     limits:
       cpu: 200m
       memory: 128Mi
 
+
+# ============================================================
+# BACKEND
+# ============================================================
 backend:
+
   replicaCount: 2
+
   image:
     repository: "322686612450.dkr.ecr.ap-south-1.amazonaws.com/three-tier-backend"
     tag: "latest"
     pullPolicy: IfNotPresent
+
   service:
     port: 8080
+
   resources:
+
     requests:
       cpu: 50m
       memory: 64Mi
+
     limits:
       cpu: 300m
       memory: 256Mi
 
+
+# ============================================================
+# DATABASE
+# ============================================================
 database:
+
   image:
     repository: "postgres"
     tag: "17-alpine"
     pullPolicy: IfNotPresent
+
   service:
     port: 5432
+
   database: appdb
+
   username: appuser
+
+  # Do not put the real password here.
+  # CD will override this using GitHub Secrets.
   password: "change-me-in-github-values"
+
+
+  # ----------------------------------------------------------
+  # PostgreSQL persistent storage
+  # ----------------------------------------------------------
   storage:
+
     size: 2Gi
+
+    # Empty means use the chart/default StorageClass logic.
     storageClassName: ""
+
+    # PostgreSQL needs block storage with RWO.
     accessMode: ReadWriteOnce
 
+
+  # ----------------------------------------------------------
+  # EBS StorageClass
+  # ----------------------------------------------------------
   storageClass:
+
     create: true
+
     name: ebs-gp3
+
     type: gp3
+
     fsType: ext4
 
+
+# ============================================================
+# IMAGE PULL SECRETS
+# ============================================================
 imagePullSecrets: []
