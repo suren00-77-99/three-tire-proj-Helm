@@ -104,7 +104,7 @@ jobs:
             --set backend.image.repository="$ECR_REGISTRY/three-tier-backend" \
             --set backend.image.tag="${{ inputs.image_tag }}" \
             --set database.password="${{ secrets.DB_PASSWORD }}" \
-            --wait --timeout 5m
+            --wait --timeout 15m
 
           kubectl rollout status deployment/"$RELEASE_NAME-frontend" -n "$NAMESPACE" --timeout=180s
           kubectl get deployment,service,pod -n "$NAMESPACE" -l app.kubernetes.io/component=frontend
