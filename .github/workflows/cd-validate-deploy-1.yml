@@ -636,6 +636,14 @@ jobs:
       # --------------------------------------------------------
       # AWS OIDC
       # --------------------------------------------------------
+      - name: Check configured AWS role
+        run: |
+          echo "AWS Region: $AWS_REGION"
+          echo "AWS Role ARN: $AWS_GITHUB_ROLE_ARN"
+          echo "Repository: $GITHUB_REPOSITORY"
+          echo "Branch: $GITHUB_REF"
+          echo "SHA: $GITHUB_SHA"
+
 
       - name: Configure AWS credentials with OIDC
         uses: aws-actions/configure-aws-credentials@v6
