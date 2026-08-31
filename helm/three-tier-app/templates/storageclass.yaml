@@ -1,0 +1,13 @@
+{{- if .Values.database.storageClass.create }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.database.storageClass.name }}
+provisioner: ebs.csi.aws.com
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+parameters:
+  type: {{ .Values.database.storageClass.type | quote }}
+  fsType: {{ .Values.database.storageClass.fsType | quote }}
+{{- end }}

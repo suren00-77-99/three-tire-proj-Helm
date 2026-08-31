@@ -58,14 +58,16 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+
   volumeClaimTemplates:
     - metadata:
-        name: data
+        name: postgres-data
       spec:
-        accessModes: ["ReadWriteOnce"]
-        {{- if .Values.database.storage.storageClassName }}
-        storageClassName: {{ .Values.database.storage.storageClassName | quote }}
-        {{- end }}
+        accessModes:
+          - {{ .Values.database.storage.accessMode }}
+
+        storageClassName: {{ .Values.database.storageClass.name }}
+
         resources:
           requests:
             storage: {{ .Values.database.storage.size }}

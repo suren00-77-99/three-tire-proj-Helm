@@ -48,5 +48,12 @@ database:
   storage:
     size: 2Gi
     storageClassName: ""
+    accessMode: ReadWriteOnce
+
+  storageClass:
+    create: true
+    name: ebs-gp3
+    type: gp3
+    fsType: ext4
 
 imagePullSecrets: []
