@@ -129,21 +129,15 @@ jobs:
   # BUILD + SCAN + PUSH
   # ==========================================================
   build-scan-push:
-
     name: Build, Trivy scan and push
-
     needs:
       - helm-lint-test
-
     # Build and push only for push/manual execution.
     # Pull requests perform Helm validation only.
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-
     runs-on: ubuntu-latest
-
     strategy:
       fail-fast: true
-
       matrix:
         include:
 
@@ -255,7 +249,7 @@ jobs:
           aws ecr create-repository \
             --repository-name "${{ matrix.repository }}" \
             --image-scanning-configuration scanOnPush=true \
-            --image-tag-mutability IMMUTABLE
+            --image-tag-mutability MUTABLE
 
 
       # ======================================================
@@ -355,14 +349,23 @@ jobs:
       - name: Push approved image to ECR
         env:
           IMAGE_URI: ${{ env.ECR_REGISTRY }}/${{ matrix.repository }}:${{ github.sha }}
+          LATEST_URI: ${{ env.ECR_REGISTRY }}/${{ matrix.repository }}:latest
 
         run: |
           echo "Security checks passed."
-          echo "Pushing image:"
+
+          echo "Pushing versioned image:"
           echo "$IMAGE_URI"
 
           docker push "$IMAGE_URI"
 
+          echo "Tagging image as latest:"
+          docker tag "$IMAGE_URI" "$LATEST_URI"
+
+          echo "Pushing latest image:"
+          echo "$LATEST_URI"
+
+          docker push "$LATEST_URI"
 
       # ======================================================
       # STAGE 2.14
@@ -371,15 +374,16 @@ jobs:
       - name: Verify pushed image
         env:
           IMAGE_URI: ${{ env.ECR_REGISTRY }}/${{ matrix.repository }}:${{ github.sha }}
-
         run: |
-          echo "ECR image:"
-          echo "$IMAGE_URI"
-
+          echo "Verifying versioned image..."
           aws ecr describe-images \
             --repository-name "${{ matrix.repository }}" \
             --image-ids imageTag="${{ github.sha }}"
 
+          echo "Verifying latest image..."
+          aws ecr describe-images \
+            --repository-name "${{ matrix.repository }}" \
+            --image-ids imageTag="latest"
 
       # ======================================================
       # STAGE 2.15
