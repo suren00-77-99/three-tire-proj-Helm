@@ -110,7 +110,35 @@ jobs:
 
           kubectl rollout status deployment/"$RELEASE_NAME-frontend" -n "$NAMESPACE" --timeout=180s
           kubectl get deployment,service,pod -n "$NAMESPACE" -l app.kubernetes.io/component=frontend
+      - name: Debug Kubernetes
+        if: always()
+        run: |
+          echo "========== PODS =========="
+          kubectl get pods -n "$NAMESPACE" -o wide
 
+          echo "========== DEPLOYMENTS =========="
+          kubectl get deployments -n "$NAMESPACE"
+
+          echo "========== STATEFULSETS =========="
+          kubectl get statefulsets -n "$NAMESPACE"
+
+          echo "========== PVC =========="
+          kubectl get pvc -n "$NAMESPACE"
+
+          echo "========== SERVICES =========="
+          kubectl get services -n "$NAMESPACE"
+
+          echo "========== EVENTS =========="
+          kubectl get events \
+            -n "$NAMESPACE" \
+            --sort-by='.lastTimestamp'
+
+      - name: Fail if Helm failed
+        if: steps.helm.outcome == 'failure'
+        run: |
+          echo "Helm deployment failed."
+          exit 1
+          
   deploy-backend:
     name: Deploy backend
     needs: deploy-frontend
