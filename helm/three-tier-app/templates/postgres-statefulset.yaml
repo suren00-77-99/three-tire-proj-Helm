@@ -61,7 +61,7 @@ spec:
 
   volumeClaimTemplates:
     - metadata:
-        name: postgres-data
+        name: data
       spec:
         accessModes:
           - {{ .Values.database.storage.accessMode }}
