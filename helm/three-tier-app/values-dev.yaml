@@ -1,11 +1,11 @@
 frontend:
   image:
     repository: "322686612450.dkr.ecr.ap-south-1.amazonaws.com/three-tier-frontend"
-    tag: "509063918762ffd3c8a75c098af5581060719630"
+    tag: "latest"
 backend:
   image:
     repository: "322686612450.dkr.ecr.ap-south-1.amazonaws.com/three-tier-backend"
-    tag: "509063918762ffd3c8a75c098af5581060719630"
+    tag: "latest"
 
 database:
   password: "Suren@7712"

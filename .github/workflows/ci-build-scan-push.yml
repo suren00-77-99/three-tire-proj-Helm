@@ -6,7 +6,7 @@ on:
       - master
     paths:
       - "app/**"
-      - "helm/**"
+      #- "helm/**"
       - ".github/workflows/ci-build-scan-push.yml"
 
   pull_request:
