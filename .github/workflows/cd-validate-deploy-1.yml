@@ -1,5 +1,28 @@
 name: CD - Validate Cluster and Deploy
-
+# ============================================================
+# MANUAL CD TRIGGER
+# ============================================================
+#
+# Run this workflow manually from:
+#
+# GitHub
+#   -> Actions
+#   -> CD - Validate Cluster and Deploy
+#   -> Run workflow
+#
+# Enter the image tag produced by CI.
+#
+# Example:
+#
+# image_tag:
+# a8f34c91e2b123456789
+#
+# The same image tag will be used for:
+#
+# frontend
+# backend
+#
+# ============================================================
 on:
   workflow_dispatch:
     inputs:
@@ -7,73 +30,612 @@ on:
         description: "Git commit SHA tag produced by CI"
         required: true
         type: string
-
+# ============================================================
+# GITHUB ACTIONS PERMISSIONS
+# ============================================================
 permissions:
   contents: read
   id-token: write
-
+# ============================================================
+# GLOBAL ENVIRONMENT VARIABLES
+# ============================================================
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
-  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
   AWS_GITHUB_ROLE_ARN: ${{ vars.AWS_GITHUB_ROLE_ARN }}
+  # ----------------------------------------------------------
+  # EBS CSI IAM ROLE
+  # ----------------------------------------------------------
+  # Example:
+  # arn:aws:iam::322686612450:role/AmazonEKS_EBS_CSI_DriverRole
+  # Store this as a GitHub Repository Variable:
+  # AWS_EBS_CSI_ROLE_ARN
+  # ----------------------------------------------------------
+  AWS_EBS_CSI_ROLE_ARN: ${{ vars.AWS_EBS_CSI_ROLE_ARN }}
+  # ----------------------------------------------------------
+  # EKS
+  # ----------------------------------------------------------
   EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
+  # ----------------------------------------------------------
+  # ECR
+  # ----------------------------------------------------------
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+  FRONTEND_IMAGE: ${{ vars.ECR_REGISTRY }}/three-tier-frontend
+  BACKEND_IMAGE: ${{ vars.ECR_REGISTRY }}/three-tier-backend
+  # ----------------------------------------------------------
+  # Kubernetes
+  # ----------------------------------------------------------
   NAMESPACE: three-tier
   RELEASE_NAME: three-tier-app
 
 jobs:
+  # ==========================================================
+  # JOB 1
+  # VALIDATE EKS CLUSTER
+  # ==========================================================
   validate-cluster:
-    name: Validate manually-created EKS cluster
+    name: Validate EKS Cluster
     runs-on: ubuntu-latest
-    outputs:
-      cluster_status: ${{ steps.cluster.outputs.status }}
     steps:
+      # --------------------------------------------------------
+      # Configure AWS credentials using GitHub OIDC
+      # --------------------------------------------------------
       - name: Configure AWS credentials with OIDC
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ env.AWS_GITHUB_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-
-      - name: Validate EKS cluster exists
-        id: cluster
+      # --------------------------------------------------------
+      # Verify AWS identity
+      # --------------------------------------------------------
+      - name: Verify AWS identity
         run: |
           set -euo pipefail
-          aws eks describe-cluster --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION" \
-            --query 'cluster.{name:name,status:status,version:version,endpoint:endpoint}' \
-            --output table
-          aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
-          kubectl version 
-          kubectl get nodes -o wide
-          kubectl get storageclass
-          echo "status=validated" >> "$GITHUB_OUTPUT"
-
-      - name: Verify Kubernetes API access
+          echo "=========================================="
+          echo "AWS IDENTITY"
+          echo "=========================================="
+          aws sts get-caller-identity
+      # --------------------------------------------------------
+      # Install kubectl
+      # --------------------------------------------------------
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+      # --------------------------------------------------------
+      # Install Helm
+      # --------------------------------------------------------
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+      # --------------------------------------------------------
+      # Validate EKS cluster
+      # --------------------------------------------------------
+      - name: Validate EKS cluster exists
         run: |
-          kubectl auth can-i get pods --all-namespaces
-          kubectl auth can-i create deployments -n "$NAMESPACE" || true
-
+          set -euo pipefail
+          echo "=========================================="
+          echo "EKS CLUSTER VALIDATION"
+          echo "=========================================="
+          echo ""
+          echo "Cluster details:"
+          aws eks describe-cluster \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$AWS_REGION" \
+            --query 'cluster.{Name:name,Status:status,Version:version,Endpoint:endpoint}' \
+            --output table
+          STATUS=$(aws eks describe-cluster \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$AWS_REGION" \
+            --query 'cluster.status' \
+            --output text)
+          echo ""
+          echo "Cluster status:"
+          echo "$STATUS"
+          if [ "$STATUS" != "ACTIVE" ]; then
+            echo ""
+            echo "ERROR: EKS cluster is not ACTIVE."
+            exit 1
+          fi
+          echo ""
+          echo "EKS cluster is ACTIVE."
+      # --------------------------------------------------------
+      # Configure kubeconfig
+      # --------------------------------------------------------
+      - name: Configure kubeconfig
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$AWS_REGION"
+      # --------------------------------------------------------
+      # Validate Kubernetes API
+      # --------------------------------------------------------
+      - name: Validate Kubernetes API
+        run: |
+          set -euo pipefail
+          echo "=========================================="
+          echo "KUBERNETES API"
+          echo "=========================================="
+          kubectl cluster-info
+          echo ""
+          kubectl version
+      # --------------------------------------------------------
+      # Validate worker nodes
+      # --------------------------------------------------------
+      - name: Validate worker nodes
+        run: |
+          set -euo pipefail
+          echo "=========================================="
+          echo "WORKER NODES"
+          echo "=========================================="
+          kubectl get nodes -o wide
+          echo ""
+          echo "Checking node readiness..."
+          NOT_READY=$(kubectl get nodes \
+            --no-headers | \
+            awk '$2 != "Ready" {print}')
+          if [ -n "$NOT_READY" ]; then
+            echo ""
+            echo "ERROR: Some worker nodes are not Ready."
+            echo "$NOT_READY"
+            exit 1
+          fi
+          echo ""
+          echo "All worker nodes are Ready."
+      # --------------------------------------------------------
+      # Validate Kubernetes permissions
+      # --------------------------------------------------------
+      - name: Validate Kubernetes permissions
+        run: |
+          set -euo pipefail
+          echo "=========================================="
+          echo "KUBERNETES PERMISSIONS"
+          echo "=========================================="
+          echo ""
+          echo "Can get pods:"
+          kubectl auth can-i get pods \
+            --all-namespaces
+          echo ""
+          echo "Can create deployments:"
+          kubectl auth can-i create deployments \
+            -n "$NAMESPACE"
+          echo ""
+          echo "Can create statefulsets:"
+          kubectl auth can-i create statefulsets \
+            -n "$NAMESPACE"
+          echo ""
+          echo "Can create services:"
+          kubectl auth can-i create services \
+            -n "$NAMESPACE"
+          echo ""
+          echo "Can create PVC:"
+          kubectl auth can-i create persistentvolumeclaims \
+            -n "$NAMESPACE"
+      # --------------------------------------------------------
+      # StorageClass
+      # --------------------------------------------------------
+      - name: Check StorageClasses
+        run: |
+          echo "=========================================="
+          echo "STORAGE CLASSES"
+          echo "=========================================="
+          kubectl get storageclass || true
+      # --------------------------------------------------------
+      # Cluster summary
+      # --------------------------------------------------------
       - name: Cluster summary
         run: |
           {
-            echo "## Cluster validation"
+            echo "# EKS Cluster Validation"
             echo ""
             echo "| Item | Value |"
             echo "|---|---|"
             echo "| Cluster | \`$EKS_CLUSTER_NAME\` |"
             echo "| Region | \`$AWS_REGION\` |"
-            echo "| Status | validated |"
-            echo "| Nodes |"
+            echo "| Status | ACTIVE |"
+            echo ""
+            echo "## Nodes"
             echo '```text'
-            kubectl get nodes --no-headers
+            kubectl get nodes -o wide
+            echo '```'
+            echo ""
+            echo "## StorageClasses"
+            echo '```text'
+            kubectl get storageclass
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-  deploy-frontend:
-    name: Deploy frontend
-    needs: validate-cluster
+  # ==========================================================
+  # JOB 2
+  # VALIDATE EBS / EFS REQUIREMENT
+  # ==========================================================
+  detect-storage:
+    name: Detect Storage Requirement
     runs-on: ubuntu-latest
+    needs:
+      - validate-cluster
+    outputs:
+      storage_type: ${{ steps.storage.outputs.storage_type }}
     steps:
-      - uses: actions/checkout@v5
+      # --------------------------------------------------------
+      # Checkout Helm chart
+      # --------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v5
+      # --------------------------------------------------------
+      # Detect storage requirement
+      #
+      # Logic:
+      #
+      # PVC doesn't exist
+      #       |
+      #       -> No CSI addon
+      #
+      # PVC exists
+      #       |
+      #       -> ReadWriteOnce = EBS
+      #
+      #       -> ReadWriteMany = EFS
+      #
+      # --------------------------------------------------------
+
+      - name: Detect storage
+        id: storage
+        run: |
+          set -euo pipefail
+          echo "=========================================="
+          echo "STORAGE DETECTION"
+          echo "=========================================="
+          echo ""
+          echo "Checking Helm chart for PVC..."
+          if ! grep -Riq \
+            "kind: PersistentVolumeClaim" \
+            helm/three-tier-app/templates \
+            2>/dev/null; then
+            echo ""
+            echo "No PersistentVolumeClaim found."
+            echo "storage_type=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo ""
+          echo "PersistentVolumeClaim detected."
+          # ----------------------------------------------------
+          # ReadWriteMany
+          # ----------------------------------------------------
+          if grep -Riq \
+            "ReadWriteMany" \
+            helm/three-tier-app/templates; then
+            echo ""
+            echo "ReadWriteMany detected."
+            echo "Storage selected: EFS"
+            echo "storage_type=efs" >> "$GITHUB_OUTPUT"
+          else
+            echo ""
+            echo "ReadWriteOnce detected."
+            echo "Storage selected: EBS"
+            echo "storage_type=ebs" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Storage summary
+        run: |
+          echo ""
+          echo "Selected storage:"
+          echo "${{ steps.storage.outputs.storage_type }}"
+          {
+            echo "# Storage Decision"
+            echo ""
+            echo "Selected storage: \`${{ steps.storage.outputs.storage_type }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+  # ==========================================================
+  # JOB 3
+  # CONFIGURE REQUIRED STORAGE ADDON
+  # ==========================================================
+  configure-storage:
+    name: Configure Storage Addon
+    runs-on: ubuntu-latest
+    needs:
+      - detect-storage
+    steps:
+      # --------------------------------------------------------
+      # Configure AWS
+      # --------------------------------------------------------
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_GITHUB_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      # --------------------------------------------------------
+      # Configure kubeconfig
+      # --------------------------------------------------------
+      - name: Configure kubeconfig
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$AWS_REGION"
+      # ========================================================
+      # EBS CSI
+      # ========================================================
+      - name: Validate EBS CSI IAM role
+        if: needs.detect-storage.outputs.storage_type == 'ebs'
+        run: |
+
+          set -euo pipefail
+          echo "=========================================="
+          echo "EBS CSI IAM ROLE"
+          echo "=========================================="
+          if [ -z "$AWS_EBS_CSI_ROLE_ARN" ]; then
+            echo ""
+            echo "ERROR:"
+            echo "AWS_EBS_CSI_ROLE_ARN is not configured."
+            echo ""
+            echo "Create a GitHub Repository Variable:"
+
+            echo ""
+            echo "AWS_EBS_CSI_ROLE_ARN"
+            exit 1
+          fi
+          echo "EBS CSI IAM role:"
+          echo "$AWS_EBS_CSI_ROLE_ARN"
+      # --------------------------------------------------------
+      # Check/install EBS CSI addon
+      # --------------------------------------------------------
+      - name: Check and install EBS CSI addon
+        if: needs.detect-storage.outputs.storage_type == 'ebs'
+        run: |
+          set -euo pipefail
+          echo "=========================================="
+          echo "EBS CSI DRIVER"
+          echo "=========================================="
+          if aws eks describe-addon \
+            --cluster-name "$EKS_CLUSTER_NAME" \
+            --addon-name aws-ebs-csi-driver \
+            --region "$AWS_REGION" \
+            >/dev/null 2>&1; then
+            echo ""
+            echo "EBS CSI addon already exists."
+            echo ""
+            echo "Updating EBS CSI addon IAM role..."
+            aws eks update-addon \
+              --cluster-name "$EKS_CLUSTER_NAME" \
+              --addon-name aws-ebs-csi-driver \
+              --service-account-role-arn "$AWS_EBS_CSI_ROLE_ARN" \
+              --resolve-conflicts OVERWRITE \
+              --region "$AWS_REGION"
+          else
+            echo ""
+            echo "EBS CSI addon does not exist."
+            echo "Installing EBS CSI addon..."
+            aws eks create-addon \
+              --cluster-name "$EKS_CLUSTER_NAME" \
+              --addon-name aws-ebs-csi-driver \
+              --service-account-role-arn "$AWS_EBS_CSI_ROLE_ARN" \
+              --resolve-conflicts OVERWRITE \
+              --region "$AWS_REGION"
+          fi
+          echo ""
+          echo "Waiting for EBS CSI addon..."
+          aws eks wait addon-active \
+            --cluster-name "$EKS_CLUSTER_NAME" \
+            --addon-name aws-ebs-csi-driver \
+            --region "$AWS_REGION"
+          echo ""
+          echo "EBS CSI addon status:"
+          aws eks describe-addon \
+            --cluster-name "$EKS_CLUSTER_NAME" \
+            --addon-name aws-ebs-csi-driver \
+            --region "$AWS_REGION" \
+            --query 'addon.{Status:status,Version:addonVersion,Role:serviceAccountRoleArn}' \
+            --output table
+      # ========================================================
+      # EFS
+      # ========================================================
+      - name: EFS CSI requirement
+        if: needs.detect-storage.outputs.storage_type == 'efs'
+        run: |
+          set -euo pipefail
+          echo "=========================================="
+          echo "EFS CSI DRIVER"
+          echo "=========================================="
+          echo ""
+          echo "The Helm chart requires ReadWriteMany storage."
+          echo ""
+          echo "EFS requires:"
+          echo ""
+          echo "1. EFS filesystem"
+          echo "2. EFS mount targets"
+          echo "3. EFS CSI IAM role"
+          echo "4. EFS CSI addon"
+          echo ""
+          echo "EFS infrastructure must be configured before deployment."
+          exit 1
+      # ========================================================
+      # No storage
+      # ========================================================
+      - name: No CSI addon required
+        if: needs.detect-storage.outputs.storage_type == 'none'
+        run: |
+
+          echo "No PVC detected."
+
+          echo "No EBS/EFS CSI addon is required."
+
+
+      # --------------------------------------------------------
+      # Verify storage
+      # --------------------------------------------------------
+
+      - name: Verify storage addon
+        run: |
+
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "STORAGE VALIDATION"
+          echo "=========================================="
+
+
+          kubectl get storageclass
+
+
+          if [ "${{ needs.detect-storage.outputs.storage_type }}" = "ebs" ]; then
+
+            echo ""
+            echo "EBS CSI pods:"
+
+
+            kubectl get pods \
+              -n kube-system \
+              -l app.kubernetes.io/name=aws-ebs-csi-driver
+
+
+          fi
+
+
+  # ==========================================================
+  # JOB 4
+  # VALIDATE HELM CHART
+  # ==========================================================
+
+  validate-helm:
+
+    name: Validate Helm Chart
+
+    runs-on: ubuntu-latest
+
+    needs:
+      - configure-storage
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+
+      # --------------------------------------------------------
+      # Helm lint
+      # --------------------------------------------------------
+
+      - name: Helm lint
+        run: |
+
+          set -euo pipefail
+
+          helm lint helm/three-tier-app
+
+
+      # --------------------------------------------------------
+      # Helm template
+      # --------------------------------------------------------
+
+      - name: Helm template
+        run: |
+
+          set -euo pipefail
+
+          helm template "$RELEASE_NAME" \
+            helm/three-tier-app \
+            --namespace "$NAMESPACE" \
+            --set frontend.image.repository="$FRONTEND_IMAGE" \
+            --set frontend.image.tag="${{ inputs.image_tag }}" \
+            --set frontend.image.pullPolicy=Always \
+            --set backend.image.repository="$BACKEND_IMAGE" \
+            --set backend.image.tag="${{ inputs.image_tag }}" \
+            --set backend.image.pullPolicy=Always \
+            --set database.password="${{ secrets.DB_PASSWORD }}" \
+            > /tmp/rendered.yaml
+
+
+          echo "Helm template generated successfully."
+
+
+      # --------------------------------------------------------
+      # Prevent Namespace ownership conflict
+      # --------------------------------------------------------
+
+      - name: Validate namespace is not managed by Helm
+        run: |
+
+          set -euo pipefail
+
+
+          if grep -qE \
+            '^kind:[[:space:]]*Namespace' \
+            /tmp/rendered.yaml; then
+
+            echo ""
+            echo "ERROR:"
+            echo "The Helm chart contains a Namespace resource."
+
+
+            echo ""
+            echo "Remove:"
+            echo "helm/three-tier-app/templates/namespace.yaml"
+
+
+            echo ""
+            echo "The CD pipeline manages the namespace."
+
+
+            exit 1
+
+          fi
+
+
+          echo "Namespace resource is not included in Helm chart."
+
+
+      # --------------------------------------------------------
+      # Helm summary
+      # --------------------------------------------------------
+
+      - name: Helm validation summary
+        run: |
+
+          {
+            echo "# Helm Validation"
+            echo ""
+            echo "- Helm lint: SUCCESS"
+            echo "- Helm template: SUCCESS"
+            echo "- Namespace check: SUCCESS"
+            echo ""
+            echo "## Images"
+            echo ""
+            echo "- Frontend: \`$FRONTEND_IMAGE:${{ inputs.image_tag }}\`"
+            echo "- Backend: \`$BACKEND_IMAGE:${{ inputs.image_tag }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+
+  # ==========================================================
+  # JOB 5
+  # DEPLOY COMPLETE APPLICATION
+  # ==========================================================
+
+  deploy:
+
+    name: Deploy Three-Tier Application
+
+    runs-on: ubuntu-latest
+
+    needs:
+      - validate-helm
+
+    environment:
+      name: production
+
+    steps:
+
+      # --------------------------------------------------------
+      # Checkout source
+      # --------------------------------------------------------
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+
+      # --------------------------------------------------------
+      # AWS OIDC
+      # --------------------------------------------------------
 
       - name: Configure AWS credentials with OIDC
         uses: aws-actions/configure-aws-credentials@v6
@@ -81,127 +643,433 @@ jobs:
           role-to-assume: ${{ env.AWS_GITHUB_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+
+      # --------------------------------------------------------
+      # Install kubectl
+      # --------------------------------------------------------
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+
+      # --------------------------------------------------------
+      # Install Helm
+      # --------------------------------------------------------
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+
+      # --------------------------------------------------------
+      # Configure kubeconfig
+      # --------------------------------------------------------
+
       - name: Configure kubeconfig
-        run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+        run: |
+
+          set -euo pipefail
+
+          aws eks update-kubeconfig \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$AWS_REGION"
+
+
+      # --------------------------------------------------------
+      # Ensure namespace exists
+      #
+      # IMPORTANT:
+      #
+      # Helm chart does NOT contain namespace.yaml.
+      #
+      # Therefore Helm will not try to adopt the namespace.
+      # --------------------------------------------------------
 
       - name: Ensure namespace exists
         run: |
+
           set -euo pipefail
-          if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
+
+
+          if kubectl get namespace "$NAMESPACE" \
+            >/dev/null 2>&1; then
+
             echo "Namespace '$NAMESPACE' already exists."
+
           else
+
             echo "Namespace '$NAMESPACE' does not exist."
+
             echo "Creating namespace..."
+
+
             kubectl create namespace "$NAMESPACE"
+
+
+            echo "Namespace created successfully."
+
           fi
-      
-      - name: Deploy frontend stage
+
+
+      # --------------------------------------------------------
+      # Verify CI image exists in ECR
+      # --------------------------------------------------------
+
+      - name: Verify frontend image in ECR
         run: |
-          helm upgrade --install "$RELEASE_NAME" helm/three-tier-app \
-            --namespace "$NAMESPACE" --create-namespace \
-            --set frontend.image.repository="$ECR_REGISTRY/three-tier-frontend" \
+
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "FRONTEND ECR IMAGE"
+          echo "=========================================="
+
+
+          echo ""
+          echo "Repository:"
+          echo "three-tier-frontend"
+
+
+          echo ""
+          echo "Tag:"
+          echo "${{ inputs.image_tag }}"
+
+
+          aws ecr describe-images \
+            --repository-name three-tier-frontend \
+            --image-ids imageTag="${{ inputs.image_tag }}" \
+            --region "$AWS_REGION" \
+            --output table
+
+
+      - name: Verify backend image in ECR
+        run: |
+
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "BACKEND ECR IMAGE"
+          echo "=========================================="
+
+
+          echo ""
+          echo "Repository:"
+          echo "three-tier-backend"
+
+
+          echo ""
+          echo "Tag:"
+          echo "${{ inputs.image_tag }}"
+
+
+          aws ecr describe-images \
+            --repository-name three-tier-backend \
+            --image-ids imageTag="${{ inputs.image_tag }}" \
+            --region "$AWS_REGION" \
+            --output table
+
+
+      # ========================================================
+      # ONE HELM RELEASE
+      #
+      # Frontend
+      # Backend
+      # PostgreSQL
+      #
+      # are deployed together.
+      # ========================================================
+
+      - name: Deploy application with Helm
+        id: helm
+        run: |
+
+          set -euo pipefail
+
+
+          echo "=========================================="
+          echo "HELM DEPLOYMENT"
+          echo "=========================================="
+
+
+          echo ""
+          echo "Release:"
+          echo "$RELEASE_NAME"
+
+
+          echo ""
+          echo "Namespace:"
+          echo "$NAMESPACE"
+
+
+          echo ""
+          echo "Image tag:"
+          echo "${{ inputs.image_tag }}"
+
+
+          echo ""
+          echo "Frontend:"
+          echo "$FRONTEND_IMAGE:${{ inputs.image_tag }}"
+
+
+          echo ""
+          echo "Backend:"
+          echo "$BACKEND_IMAGE:${{ inputs.image_tag }}"
+
+
+          helm upgrade --install "$RELEASE_NAME" \
+            helm/three-tier-app \
+            --namespace "$NAMESPACE" \
+            --set frontend.image.repository="$FRONTEND_IMAGE" \
             --set frontend.image.tag="${{ inputs.image_tag }}" \
-            --set backend.image.repository="$ECR_REGISTRY/three-tier-backend" \
+            --set frontend.image.pullPolicy=Always \
+            --set backend.image.repository="$BACKEND_IMAGE" \
             --set backend.image.tag="${{ inputs.image_tag }}" \
+            --set backend.image.pullPolicy=Always \
             --set database.password="${{ secrets.DB_PASSWORD }}" \
-            --wait --timeout 15m
+            --wait \
+            --timeout 10m
 
-          kubectl rollout status deployment/"$RELEASE_NAME-frontend" -n "$NAMESPACE" --timeout=180s
-          kubectl get deployment,service,pod -n "$NAMESPACE" -l app.kubernetes.io/component=frontend
-      - name: Debug Kubernetes
-        if: always()
+
+          echo ""
+          echo "Helm deployment completed successfully."
+
+
+      # ========================================================
+      # FRONTEND ROLLOUT
+      # ========================================================
+
+      - name: Validate frontend rollout
         run: |
+
+          set -euo pipefail
+
+
+          kubectl rollout status \
+            deployment/"$RELEASE_NAME-frontend" \
+            -n "$NAMESPACE" \
+            --timeout=300s
+
+
+      # ========================================================
+      # BACKEND ROLLOUT
+      # ========================================================
+
+      - name: Validate backend rollout
+        run: |
+
+          set -euo pipefail
+
+
+          kubectl rollout status \
+            deployment/"$RELEASE_NAME-backend" \
+            -n "$NAMESPACE" \
+            --timeout=300s
+
+
+      # ========================================================
+      # DATABASE ROLLOUT
+      # ========================================================
+
+      - name: Validate PostgreSQL rollout
+        run: |
+
+          set -euo pipefail
+
+
+          kubectl rollout status \
+            statefulset/"$RELEASE_NAME-postgres" \
+            -n "$NAMESPACE" \
+            --timeout=300s
+
+
+      # ========================================================
+      # SHOW APPLICATION RESOURCES
+      # ========================================================
+
+      - name: Show deployed resources
+        run: |
+
+          echo "=========================================="
+          echo "DEPLOYED RESOURCES"
+          echo "=========================================="
+
+
+          echo ""
+          echo "Deployments:"
+
+          kubectl get deployments \
+            -n "$NAMESPACE"
+
+
+          echo ""
+          echo "StatefulSets:"
+
+          kubectl get statefulsets \
+            -n "$NAMESPACE"
+
+
+          echo ""
+          echo "Services:"
+
+          kubectl get services \
+            -n "$NAMESPACE"
+
+
+          echo ""
+          echo "Pods:"
+
+          kubectl get pods \
+            -n "$NAMESPACE" \
+            -o wide
+
+
+          echo ""
+          echo "PVC:"
+
+          kubectl get pvc \
+            -n "$NAMESPACE"
+
+
+      # ========================================================
+      # FAILURE DEBUGGING
+      # ========================================================
+
+      - name: Debug Kubernetes when deployment fails
+        if: failure()
+        run: |
+
+          echo "=========================================="
+          echo "DEPLOYMENT DEBUG"
+          echo "=========================================="
+
+
+          echo ""
+          echo "========== HELM STATUS =========="
+
+          helm status \
+            "$RELEASE_NAME" \
+            -n "$NAMESPACE" || true
+
+
+          echo ""
+          echo "========== HELM HISTORY =========="
+
+          helm history \
+            "$RELEASE_NAME" \
+            -n "$NAMESPACE" || true
+
+
+          echo ""
           echo "========== PODS =========="
-          kubectl get pods -n "$NAMESPACE" -o wide
 
+          kubectl get pods \
+            -n "$NAMESPACE" \
+            -o wide || true
+
+
+          echo ""
           echo "========== DEPLOYMENTS =========="
-          kubectl get deployments -n "$NAMESPACE"
 
+          kubectl get deployments \
+            -n "$NAMESPACE" || true
+
+
+          echo ""
           echo "========== STATEFULSETS =========="
-          kubectl get statefulsets -n "$NAMESPACE"
 
+          kubectl get statefulsets \
+            -n "$NAMESPACE" || true
+
+
+          echo ""
           echo "========== PVC =========="
-          kubectl get pvc -n "$NAMESPACE"
 
+          kubectl get pvc \
+            -n "$NAMESPACE" || true
+
+
+          echo ""
+          echo "========== PV =========="
+
+          kubectl get pv || true
+
+
+          echo ""
+          echo "========== STORAGECLASSES =========="
+
+          kubectl get storageclass || true
+
+
+          echo ""
           echo "========== SERVICES =========="
-          kubectl get services -n "$NAMESPACE"
 
+          kubectl get services \
+            -n "$NAMESPACE" || true
+
+
+          echo ""
           echo "========== EVENTS =========="
+
           kubectl get events \
             -n "$NAMESPACE" \
-            --sort-by='.lastTimestamp'
+            --sort-by='.lastTimestamp' || true
 
-      - name: Fail if Helm failed
-        if: steps.helm.outcome == 'failure'
-        run: |
-          echo "Helm deployment failed."
-          exit 1
-  deploy-backend:
-    name: Deploy backend
-    needs: deploy-frontend
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
 
-      - name: Configure AWS credentials with OIDC
-        uses: aws-actions/configure-aws-credentials@v6
-        with:
-          role-to-assume: ${{ env.AWS_GITHUB_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          echo ""
+          echo "========== FRONTEND LOGS =========="
 
-      - name: Configure kubeconfig
-        run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+          kubectl logs \
+            deployment/"$RELEASE_NAME-frontend" \
+            -n "$NAMESPACE" \
+            --all-containers=true \
+            --tail=200 || true
 
-      - name: Deploy backend stage
-        run: |
-          helm upgrade --install "$RELEASE_NAME" helm/three-tier-app \
-            --namespace "$NAMESPACE" --create-namespace \
-            --set frontend.image.repository="$ECR_REGISTRY/three-tier-frontend" \
-            --set frontend.image.tag="${{ inputs.image_tag }}" \
-            --set backend.image.repository="$ECR_REGISTRY/three-tier-backend" \
-            --set backend.image.tag="${{ inputs.image_tag }}" \
-            --set database.password="${{ secrets.DB_PASSWORD }}" \
-            --wait --timeout 5m
 
-          kubectl rollout status deployment/"$RELEASE_NAME-backend" -n "$NAMESPACE" --timeout=180s
-          kubectl get deployment,service,pod -n "$NAMESPACE" -l app.kubernetes.io/component=backend
+          echo ""
+          echo "========== BACKEND LOGS =========="
 
-  deploy-database:
-    name: Deploy database
-    needs: deploy-backend
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
+          kubectl logs \
+            deployment/"$RELEASE_NAME-backend" \
+            -n "$NAMESPACE" \
+            --all-containers=true \
+            --tail=200 || true
 
-      - name: Configure AWS credentials with OIDC
-        uses: aws-actions/configure-aws-credentials@v6
-        with:
-          role-to-assume: ${{ env.AWS_GITHUB_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Configure kubeconfig
-        run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+          echo ""
+          echo "========== POSTGRES LOGS =========="
 
-      - name: Deploy database stage
-        run: |
-          helm upgrade --install "$RELEASE_NAME" helm/three-tier-app \
-            --namespace "$NAMESPACE" --create-namespace \
-            --set frontend.image.repository="$ECR_REGISTRY/three-tier-frontend" \
-            --set frontend.image.tag="${{ inputs.image_tag }}" \
-            --set backend.image.repository="$ECR_REGISTRY/three-tier-backend" \
-            --set backend.image.tag="${{ inputs.image_tag }}" \
-            --set database.password="${{ secrets.DB_PASSWORD }}" \
-            --wait --timeout 5m
+          kubectl logs \
+            statefulset/"$RELEASE_NAME-postgres" \
+            -n "$NAMESPACE" \
+            --all-containers=true \
+            --tail=200 || true
 
-          kubectl rollout status statefulset/"$RELEASE_NAME-postgres" -n "$NAMESPACE" --timeout=180s
-          kubectl get statefulset,service,pod,pvc -n "$NAMESPACE" -l app.kubernetes.io/component=database
+
+          echo ""
+          echo "========== POD DESCRIPTIONS =========="
+
+          kubectl describe pods \
+            -n "$NAMESPACE" || true
+
+
+# ============================================================
+# JOB 6
+# FINAL VALIDATION
+# ============================================================
 
   verify-and-summary:
-    name: Verify and summarize deployment
-    needs: deploy-database
+
+    name: Verify and Summarize Deployment
+
     runs-on: ubuntu-latest
+
+    needs:
+      - deploy
+
     steps:
-      - uses: actions/checkout@v5
+
+      # --------------------------------------------------------
+      # AWS
+      # --------------------------------------------------------
 
       - name: Configure AWS credentials with OIDC
         uses: aws-actions/configure-aws-credentials@v6
@@ -209,42 +1077,238 @@ jobs:
           role-to-assume: ${{ env.AWS_GITHUB_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+
+      # --------------------------------------------------------
+      # Install kubectl
+      # --------------------------------------------------------
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+
+      # --------------------------------------------------------
+      # Install Helm
+      # --------------------------------------------------------
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+
+      # --------------------------------------------------------
+      # Configure kubeconfig
+      # --------------------------------------------------------
+
       - name: Configure kubeconfig
-        run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+        run: |
+
+          set -euo pipefail
+
+          aws eks update-kubeconfig \
+            --name "$EKS_CLUSTER_NAME" \
+            --region "$AWS_REGION"
+
+
+      # ========================================================
+      # FINAL KUBERNETES CHECKS
+      # ========================================================
 
       - name: Final Kubernetes checks
         run: |
+
           set -euo pipefail
+
+
+          echo "=========================================="
+          echo "FINAL KUBERNETES VALIDATION"
+          echo "=========================================="
+
+
+          echo ""
+          echo "Nodes:"
+
           kubectl get nodes -o wide
-          kubectl get all -n "$NAMESPACE"
-          kubectl get pvc -n "$NAMESPACE"
-          helm status "$RELEASE_NAME" -n "$NAMESPACE"
-          helm test "$RELEASE_NAME" -n "$NAMESPACE" --logs
+
+
+          echo ""
+          echo "Application resources:"
+
+          kubectl get \
+            deployment,statefulset,service,pod,pvc \
+            -n "$NAMESPACE"
+
+
+          echo ""
+          echo "PVC:"
+
+          kubectl get pvc \
+            -n "$NAMESPACE"
+
+
+          echo ""
+          echo "StorageClass:"
+
+          kubectl get storageclass
+
+
+          echo ""
+          echo "Helm release:"
+
+          helm status \
+            "$RELEASE_NAME" \
+            -n "$NAMESPACE"
+
+
+      # ========================================================
+      # POD HEALTH
+      # ========================================================
+
+      - name: Validate pod health
+        run: |
+
+          set -euo pipefail
+
+
+          echo "Checking application pods..."
+
+
+          kubectl get pods \
+            -n "$NAMESPACE" \
+            -o wide
+
+
+          FAILED_PODS=$(kubectl get pods \
+            -n "$NAMESPACE" \
+            --no-headers | \
+            awk '$3 != "Running" && $3 != "Completed" {print}')
+
+
+          if [ -n "$FAILED_PODS" ]; then
+
+            echo ""
+            echo "ERROR: Unhealthy pods found."
+
+            echo "$FAILED_PODS"
+
+            exit 1
+
+          fi
+
+
+          echo ""
+          echo "All application pods are healthy."
+
+
+      # ========================================================
+      # HELM TEST
+      # ========================================================
+
+      - name: Run Helm tests
+        run: |
+
+          set -euo pipefail
+
+
+          helm test \
+            "$RELEASE_NAME" \
+            -n "$NAMESPACE" \
+            --logs
+
+
+      # ========================================================
+      # FINAL SUMMARY
+      # ========================================================
 
       - name: Write final GitHub Actions summary
         run: |
+
           {
             echo "# Deployment Summary"
             echo ""
             echo "## Cluster"
-            echo "- Name: \`$EKS_CLUSTER_NAME\`"
-            echo "- Region: \`$AWS_REGION\`"
-            echo "- Image tag: \`${{ inputs.image_tag }}\`"
             echo ""
-            echo "## Kubernetes objects"
+            echo "| Item | Value |"
+            echo "|---|---|"
+            echo "| Cluster | \`$EKS_CLUSTER_NAME\` |"
+            echo "| Region | \`$AWS_REGION\` |"
+            echo "| Namespace | \`$NAMESPACE\` |"
+            echo "| Helm Release | \`$RELEASE_NAME\` |"
+            echo "| Image Tag | \`${{ inputs.image_tag }}\` |"
+            echo ""
+            echo "## Images"
+            echo ""
+            echo "- Frontend: \`$FRONTEND_IMAGE:${{ inputs.image_tag }}\`"
+            echo "- Backend: \`$BACKEND_IMAGE:${{ inputs.image_tag }}\`"
+            echo ""
+            echo "## Kubernetes Objects"
+            echo ""
             echo '```text'
-            kubectl get deployment,statefulset,service,pod,pvc -n "$NAMESPACE"
+            kubectl get \
+              deployment,statefulset,service,pod,pvc \
+              -n "$NAMESPACE"
             echo '```'
             echo ""
             echo "## Helm"
+            echo ""
             echo '```text'
-            helm status "$RELEASE_NAME" -n "$NAMESPACE"
+            helm status \
+              "$RELEASE_NAME" \
+              -n "$NAMESPACE"
             echo '```'
             echo ""
             echo "## Result"
+            echo ""
             echo "### SUCCESSFUL DEPLOYMENT"
-            echo "Frontend, backend and database stages completed and Helm tests passed."
+            echo ""
+            echo "Frontend, backend and PostgreSQL deployment completed successfully."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Success message
-        run: echo "SUCCESSFUL DEPLOYMENT - $RELEASE_NAME on cluster $EKS_CLUSTER_NAME"
+
+      # ========================================================
+      # SUCCESS MESSAGE
+      # ========================================================
+
+      - name: Successful deployment
+        run: |
+
+          echo ""
+          echo "=========================================="
+          echo "       SUCCESSFUL DEPLOYMENT"
+          echo "=========================================="
+
+
+          echo ""
+          echo "EKS Cluster:"
+          echo "$EKS_CLUSTER_NAME"
+
+
+          echo "Namespace:"
+          echo "$NAMESPACE"
+
+
+          echo "Helm Release:"
+          echo "$RELEASE_NAME"
+
+
+          echo "Image Tag:"
+          echo "${{ inputs.image_tag }}"
+
+
+          echo ""
+          echo "Frontend:"
+          echo "$FRONTEND_IMAGE:${{ inputs.image_tag }}"
+
+
+          echo "Backend:"
+          echo "$BACKEND_IMAGE:${{ inputs.image_tag }}"
+
+
+          echo ""
+          echo "FRONTEND + BACKEND + POSTGRESQL"
+          echo "DEPLOYED SUCCESSFULLY"
+
+
+          echo ""
+          echo "CD PIPELINE COMPLETED SUCCESSFULLY"
+
+
+          echo "=========================================="
