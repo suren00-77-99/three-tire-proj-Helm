@@ -1,4 +1,4 @@
-name: CD - Deploy Application
+name: CD - Deploy Three Tier Application
 
 on:
   workflow_dispatch:
@@ -13,6 +13,9 @@ permissions:
   id-token: write
 
 env:
+  # ============================================================
+  # AWS
+  # ============================================================
   AWS_REGION: ${{ vars.AWS_REGION }}
   AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
 
@@ -20,23 +23,40 @@ env:
 
   EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
 
+  # ============================================================
+  # ECR
+  # ============================================================
   ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
 
   FRONTEND_IMAGE: ${{ vars.ECR_REGISTRY }}/three-tier-frontend
   BACKEND_IMAGE: ${{ vars.ECR_REGISTRY }}/three-tier-backend
 
+  # ============================================================
+  # KUBERNETES
+  # ============================================================
   NAMESPACE: three-tier
   RELEASE_NAME: three-tier-app
 
-  # EBS CSI IAM role
+  # ============================================================
+  # EBS CSI
+  # ============================================================
   AWS_EBS_CSI_ROLE_NAME: AmazonEKS_EBS_CSI_DriverRole
+
   AWS_EBS_CSI_POLICY_ARN: arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+
+  # ============================================================
+  # EFS / ALB
+  # ============================================================
+  AWS_EFS_CSI_ROLE_ARN: ${{ vars.AWS_EFS_CSI_ROLE_ARN }}
+
+  AWS_LB_CONTROLLER_ROLE_ARN: ${{ vars.AWS_LB_CONTROLLER_ROLE_ARN }}
 
 
 jobs:
 
   # ============================================================
-  # 1. CHECK EKS
+  # JOB 1
+  # CHECK EKS
   # ============================================================
   check-eks:
 
@@ -45,19 +65,25 @@ jobs:
 
     steps:
 
+      # --------------------------------------------------------
+      # AWS LOGIN
+      # --------------------------------------------------------
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ env.AWS_GITHUB_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # --------------------------------------------------------
+      # CHECK EKS
+      # --------------------------------------------------------
       - name: Check EKS cluster
         run: |
 
           set -euo pipefail
 
           echo "=========================================="
-          echo "CHECK EKS"
+          echo "CHECK EKS CLUSTER"
           echo "=========================================="
 
           if ! aws eks describe-cluster \
@@ -66,6 +92,8 @@ jobs:
             >/dev/null 2>&1; then
 
             echo "ERROR: EKS cluster does not exist."
+            echo "Cluster: $EKS_CLUSTER_NAME"
+
             exit 1
           fi
 
@@ -79,23 +107,34 @@ jobs:
           echo "Status  : $STATUS"
 
           if [ "$STATUS" != "ACTIVE" ]; then
+
             echo "ERROR: EKS cluster is not ACTIVE."
+
             exit 1
           fi
 
+          echo ""
           echo "EKS cluster is ACTIVE."
 
+      # --------------------------------------------------------
+      # KUBECTL
+      # --------------------------------------------------------
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
 
       - name: Configure kubeconfig
         run: |
 
+          set -euo pipefail
+
           aws eks update-kubeconfig \
             --name "$EKS_CLUSTER_NAME" \
             --region "$AWS_REGION"
 
-      - name: Check nodes
+      # --------------------------------------------------------
+      # NODE CHECK
+      # --------------------------------------------------------
+      - name: Check worker nodes
         run: |
 
           set -euo pipefail
@@ -106,20 +145,25 @@ jobs:
             awk '$2 != "Ready" {print}')
 
           if [ -n "$NOT_READY" ]; then
-            echo "ERROR: Nodes are not Ready."
+
+            echo ""
+            echo "ERROR: Worker nodes are not Ready."
             echo "$NOT_READY"
+
             exit 1
           fi
 
-          echo "All nodes are Ready."
+          echo ""
+          echo "All worker nodes are Ready."
 
 
   # ============================================================
-  # 2. HELM VALIDATION + REQUIREMENT DETECTION
+  # JOB 2
+  # HELM VALIDATION + INFRASTRUCTURE DETECTION
   # ============================================================
   prepare:
 
-    name: Validate Helm
+    name: Validate Helm and Detect Infrastructure
     runs-on: ubuntu-latest
 
     needs:
@@ -132,9 +176,15 @@ jobs:
 
     steps:
 
-      - name: Checkout
+      # --------------------------------------------------------
+      # CHECKOUT
+      # --------------------------------------------------------
+      - name: Checkout repository
         uses: actions/checkout@v5
 
+      # --------------------------------------------------------
+      # HELM
+      # --------------------------------------------------------
       - name: Install Helm
         uses: azure/setup-helm@v4
 
@@ -146,6 +196,10 @@ jobs:
 
           set -euo pipefail
 
+          echo "=========================================="
+          echo "HELM LINT"
+          echo "=========================================="
+
           helm lint helm/three-tier-app
 
       # --------------------------------------------------------
@@ -155,6 +209,10 @@ jobs:
         run: |
 
           set -euo pipefail
+
+          echo "=========================================="
+          echo "HELM TEMPLATE"
+          echo "=========================================="
 
           helm template "$RELEASE_NAME" \
             helm/three-tier-app \
@@ -171,7 +229,7 @@ jobs:
           echo "Helm template successful."
 
       # --------------------------------------------------------
-      # DETECT REQUIRED INFRASTRUCTURE
+      # DETECT INFRASTRUCTURE
       # --------------------------------------------------------
       - name: Detect infrastructure
         id: detect
@@ -192,16 +250,15 @@ jobs:
           # ====================================================
 
           if grep -q "ebs.csi.aws.com" /tmp/rendered.yaml || \
-             grep -q "storageClassName: ebs-gp3" /tmp/rendered.yaml || \
              grep -qE "storageClassName:.*ebs" /tmp/rendered.yaml; then
 
             EBS_REQUIRED=true
 
-            echo "EBS required: YES"
+            echo "EBS: REQUIRED"
 
           else
 
-            echo "EBS required: NO"
+            echo "EBS: NOT REQUIRED"
 
           fi
 
@@ -216,17 +273,17 @@ jobs:
 
             EFS_REQUIRED=true
 
-            echo "EFS required: YES"
+            echo "EFS: REQUIRED"
 
           else
 
-            echo "EFS required: NO"
+            echo "EFS: NOT REQUIRED"
 
           fi
 
 
           # ====================================================
-          # ALB
+          # AWS LOAD BALANCER CONTROLLER
           # ====================================================
 
           if grep -qE "^kind:[[:space:]]*Ingress" /tmp/rendered.yaml || \
@@ -235,38 +292,41 @@ jobs:
 
             ALB_REQUIRED=true
 
-            echo "ALB required: YES"
+            echo "ALB: REQUIRED"
 
           else
 
-            echo "ALB required: NO"
+            echo "ALB: NOT REQUIRED"
 
           fi
 
+
+          # ====================================================
+          # OUTPUTS
+          # ====================================================
 
           echo "ebs_required=$EBS_REQUIRED" >> "$GITHUB_OUTPUT"
           echo "efs_required=$EFS_REQUIRED" >> "$GITHUB_OUTPUT"
           echo "alb_required=$ALB_REQUIRED" >> "$GITHUB_OUTPUT"
 
-      - name: Requirement summary
-        run: |
 
           echo ""
           echo "=========================================="
-          echo "REQUIREMENTS"
+          echo "INFRASTRUCTURE DECISION"
           echo "=========================================="
 
-          echo "EBS : ${{ steps.detect.outputs.ebs_required }}"
-          echo "EFS : ${{ steps.detect.outputs.efs_required }}"
-          echo "ALB : ${{ steps.detect.outputs.alb_required }}"
+          echo "EBS : $EBS_REQUIRED"
+          echo "EFS : $EFS_REQUIRED"
+          echo "ALB : $ALB_REQUIRED"
 
 
   # ============================================================
-  # 3. CONFIGURE REQUIRED INFRASTRUCTURE
+  # JOB 3
+  # CREATE IAM + INSTALL REQUIRED ADDONS
   # ============================================================
-  configure-infrastructure:
+  infrastructure:
 
-    name: Configure Infrastructure
+    name: Configure Required Infrastructure
     runs-on: ubuntu-latest
 
     needs:
@@ -274,15 +334,27 @@ jobs:
 
     steps:
 
+      # --------------------------------------------------------
+      # AWS LOGIN
+      # --------------------------------------------------------
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ env.AWS_GITHUB_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # --------------------------------------------------------
+      # TOOLS
+      # --------------------------------------------------------
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
 
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      # --------------------------------------------------------
+      # KUBECONFIG
+      # --------------------------------------------------------
       - name: Configure kubeconfig
         run: |
 
@@ -294,16 +366,16 @@ jobs:
 
 
       # ========================================================
-      # EBS OIDC + IAM ROLE
+      # EBS IAM ROLE
       # ========================================================
-      - name: Configure EBS CSI IAM
+      - name: Create or verify EBS CSI IAM role
         if: needs.prepare.outputs.ebs_required == 'true'
         run: |
 
           set -euo pipefail
 
           echo "=========================================="
-          echo "EBS CSI IAM"
+          echo "EBS CSI IAM ROLE"
           echo "=========================================="
 
           # ----------------------------------------------------
@@ -318,24 +390,21 @@ jobs:
 
           if [ -z "$OIDC_ISSUER" ] || [ "$OIDC_ISSUER" = "None" ]; then
 
-            echo "ERROR: EKS OIDC issuer not found."
+            echo "ERROR: EKS OIDC issuer is not configured."
+
             exit 1
 
           fi
 
-          echo "OIDC issuer detected."
+          echo "OIDC issuer found."
 
           OIDC_PROVIDER="${OIDC_ISSUER#https://}"
 
-          echo "OIDC provider:"
-          echo "$OIDC_PROVIDER"
-
+          OIDC_PROVIDER_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:oidc-provider/${OIDC_PROVIDER}"
 
           # ----------------------------------------------------
           # Check OIDC provider
           # ----------------------------------------------------
-
-          OIDC_PROVIDER_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:oidc-provider/${OIDC_PROVIDER}"
 
           if aws iam get-open-id-connect-provider \
             --open-id-connect-provider-arn "$OIDC_PROVIDER_ARN" \
@@ -347,20 +416,21 @@ jobs:
 
             echo "OIDC provider does not exist."
 
-            echo "Installing eksctl..."
+            echo ""
+            echo "Creating OIDC provider..."
 
-            curl --silent --location \
+            curl -sSL \
               "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" \
-              | tar xz -C /tmp
+              | tar -xz -C /tmp
 
             sudo mv /tmp/eksctl /usr/local/bin/eksctl
-
-            echo "Associating OIDC provider..."
 
             eksctl utils associate-iam-oidc-provider \
               --cluster "$EKS_CLUSTER_NAME" \
               --region "$AWS_REGION" \
               --approve
+
+            echo "OIDC provider created."
 
           fi
 
@@ -375,7 +445,6 @@ jobs:
 
             echo ""
             echo "EBS CSI IAM role already exists."
-            echo "Role: $AWS_EBS_CSI_ROLE_NAME"
 
           else
 
@@ -384,46 +453,45 @@ jobs:
             echo "Creating role..."
 
             cat > /tmp/ebs-trust-policy.json <<EOF
-          {
-            "Version": "2012-10-17",
-            "Statement": [
-              {
-                "Effect": "Allow",
-                "Principal": {
-                  "Federated": "$OIDC_PROVIDER_ARN"
-                },
-                "Action": "sts:AssumeRoleWithWebIdentity",
-                "Condition": {
-                  "StringEquals": {
-                    "${OIDC_PROVIDER}:aud": "sts.amazonaws.com",
-                    "${OIDC_PROVIDER}:sub": "system:serviceaccount:kube-system:ebs-csi-controller-sa"
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Principal": {
+                    "Federated": "$OIDC_PROVIDER_ARN"
+                  },
+                  "Action": "sts:AssumeRoleWithWebIdentity",
+                  "Condition": {
+                    "StringEquals": {
+                      "${OIDC_PROVIDER}:aud": "sts.amazonaws.com",
+                      "${OIDC_PROVIDER}:sub": "system:serviceaccount:kube-system:ebs-csi-controller-sa"
+                    }
                   }
                 }
-              }
-            ]
-          }
-          EOF
+              ]
+            }
+            EOF
 
-            aws iam create-role \
-              --role-name "$AWS_EBS_CSI_ROLE_NAME" \
-              --assume-role-policy-document file:///tmp/ebs-trust-policy.json
+                        aws iam create-role \
+                          --role-name "$AWS_EBS_CSI_ROLE_NAME" \
+                          --assume-role-policy-document file:///tmp/ebs-trust-policy.json
 
-            echo "IAM role created."
+                        echo "EBS CSI IAM role created."
 
-          fi
+                      fi
 
 
           # ----------------------------------------------------
-          # Attach EBS CSI policy
+          # Attach EBS policy
           # ----------------------------------------------------
 
-          echo ""
-          echo "Checking EBS CSI policy..."
-
-          if aws iam list-attached-role-policies \
+          POLICY_ATTACHED=$(aws iam list-attached-role-policies \
             --role-name "$AWS_EBS_CSI_ROLE_NAME" \
             --query "AttachedPolicies[?PolicyArn=='$AWS_EBS_CSI_POLICY_ARN'].PolicyArn" \
-            --output text | grep -q "$AWS_EBS_CSI_POLICY_ARN"; then
+            --output text)
+
+          if [ -n "$POLICY_ATTACHED" ]; then
 
             echo "EBS CSI policy already attached."
 
@@ -441,7 +509,7 @@ jobs:
 
 
           # ----------------------------------------------------
-          # Get final role ARN
+          # Final role check
           # ----------------------------------------------------
 
           EBS_ROLE_ARN=$(aws iam get-role \
@@ -451,14 +519,13 @@ jobs:
 
           echo ""
           echo "EBS CSI IAM role ready."
-          echo "Role name: $AWS_EBS_CSI_ROLE_NAME"
-          echo "Role ARN : $EBS_ROLE_ARN"
+          echo "Role: $EBS_ROLE_ARN"
 
 
       # ========================================================
-      # INSTALL / UPDATE EBS CSI ADDON
+      # EBS CSI ADDON
       # ========================================================
-      - name: Install EBS CSI addon
+      - name: Install or repair EBS CSI addon
         if: needs.prepare.outputs.ebs_required == 'true'
         run: |
 
@@ -482,21 +549,33 @@ jobs:
             --cluster-name "$EKS_CLUSTER_NAME" \
             --addon-name aws-ebs-csi-driver \
             --region "$AWS_REGION" \
-            >/dev/null 2>&1; then
+            >/tmp/ebs-addon.json 2>/dev/null; then
 
-            echo "EBS CSI addon already exists."
-
-            aws eks update-addon \
+            ADDON_STATUS=$(aws eks describe-addon \
               --cluster-name "$EKS_CLUSTER_NAME" \
               --addon-name aws-ebs-csi-driver \
-              --service-account-role-arn "$EBS_ROLE_ARN" \
-              --resolve-conflicts OVERWRITE \
-              --region "$AWS_REGION"
+              --region "$AWS_REGION" \
+              --query 'addon.status' \
+              --output text)
 
           else
 
-            echo "EBS CSI addon does not exist."
-            echo "Installing..."
+            ADDON_STATUS="NOT_FOUND"
+
+          fi
+
+
+          echo "Current addon status: $ADDON_STATUS"
+
+
+          # ====================================================
+          # NOT FOUND
+          # ====================================================
+
+          if [ "$ADDON_STATUS" = "NOT_FOUND" ]; then
+
+            echo ""
+            echo "Creating EBS CSI addon..."
 
             aws eks create-addon \
               --cluster-name "$EKS_CLUSTER_NAME" \
@@ -508,9 +587,100 @@ jobs:
           fi
 
 
-          # ----------------------------------------------------
-          # Wait for addon
-          # ----------------------------------------------------
+          # ====================================================
+          # CREATE_FAILED
+          # ====================================================
+
+          if [ "$ADDON_STATUS" = "CREATE_FAILED" ]; then
+
+            echo ""
+            echo "EBS CSI addon is CREATE_FAILED."
+            echo "Deleting failed addon..."
+
+            aws eks delete-addon \
+              --cluster-name "$EKS_CLUSTER_NAME" \
+              --addon-name aws-ebs-csi-driver \
+              --region "$AWS_REGION"
+
+            echo "Waiting for addon deletion..."
+
+            for i in {1..60}; do
+
+              if aws eks describe-addon \
+                --cluster-name "$EKS_CLUSTER_NAME" \
+                --addon-name aws-ebs-csi-driver \
+                --region "$AWS_REGION" \
+                >/dev/null 2>&1; then
+
+                echo "Waiting... $i/60"
+                sleep 10
+
+              else
+
+                echo "Addon deleted."
+                break
+
+              fi
+
+            done
+
+
+            # --------------------------------------------------
+            # Verify deletion
+            # --------------------------------------------------
+
+            if aws eks describe-addon \
+              --cluster-name "$EKS_CLUSTER_NAME" \
+              --addon-name aws-ebs-csi-driver \
+              --region "$AWS_REGION" \
+              >/dev/null 2>&1; then
+
+              echo "ERROR: Failed to delete EBS CSI addon."
+
+              exit 1
+
+            fi
+
+
+            # --------------------------------------------------
+            # Recreate addon
+            # --------------------------------------------------
+
+            echo ""
+            echo "Creating EBS CSI addon again..."
+
+            aws eks create-addon \
+              --cluster-name "$EKS_CLUSTER_NAME" \
+              --addon-name aws-ebs-csi-driver \
+              --service-account-role-arn "$EBS_ROLE_ARN" \
+              --resolve-conflicts OVERWRITE \
+              --region "$AWS_REGION"
+
+          fi
+
+
+          # ====================================================
+          # ACTIVE
+          # ====================================================
+
+          if [ "$ADDON_STATUS" = "ACTIVE" ]; then
+
+            echo ""
+            echo "EBS CSI addon is already ACTIVE."
+
+            aws eks update-addon \
+              --cluster-name "$EKS_CLUSTER_NAME" \
+              --addon-name aws-ebs-csi-driver \
+              --service-account-role-arn "$EBS_ROLE_ARN" \
+              --resolve-conflicts OVERWRITE \
+              --region "$AWS_REGION"
+
+          fi
+
+
+          # ====================================================
+          # WAIT ACTIVE
+          # ====================================================
 
           echo ""
           echo "Waiting for EBS CSI addon..."
@@ -525,7 +695,7 @@ jobs:
 
 
       # ========================================================
-      # EFS CSI
+      # EFS CSI ADDON
       # ========================================================
       - name: Install EFS CSI addon
         if: needs.prepare.outputs.efs_required == 'true'
@@ -544,6 +714,7 @@ jobs:
             exit 1
 
           fi
+
 
           if aws eks describe-addon \
             --cluster-name "$EKS_CLUSTER_NAME" \
@@ -573,6 +744,7 @@ jobs:
 
           fi
 
+
           aws eks wait addon-active \
             --cluster-name "$EKS_CLUSTER_NAME" \
             --addon-name aws-efs-csi-driver \
@@ -582,7 +754,7 @@ jobs:
 
 
       # ========================================================
-      # ALB CONTROLLER
+      # AWS LOAD BALANCER CONTROLLER
       # ========================================================
       - name: Install AWS Load Balancer Controller
         if: needs.prepare.outputs.alb_required == 'true'
@@ -602,16 +774,19 @@ jobs:
 
           fi
 
+
           helm repo add eks \
             https://aws.github.io/eks-charts
 
           helm repo update
+
 
           VPC_ID=$(aws eks describe-cluster \
             --name "$EKS_CLUSTER_NAME" \
             --region "$AWS_REGION" \
             --query 'cluster.resourcesVpcConfig.vpcId' \
             --output text)
+
 
           helm upgrade --install \
             aws-load-balancer-controller \
@@ -626,11 +801,13 @@ jobs:
             --wait \
             --timeout 10m
 
+
           echo "AWS Load Balancer Controller ready."
 
 
   # ============================================================
-  # 4. DEPLOY APPLICATION
+  # JOB 4
+  # DEPLOY APPLICATION
   # ============================================================
   deploy:
 
@@ -638,34 +815,49 @@ jobs:
     runs-on: ubuntu-latest
 
     needs:
-      - configure-infrastructure
+      - infrastructure
 
     steps:
 
+      # --------------------------------------------------------
+      # CHECKOUT
+      # --------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v5
 
+      # --------------------------------------------------------
+      # AWS
+      # --------------------------------------------------------
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ env.AWS_GITHUB_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # --------------------------------------------------------
+      # TOOLS
+      # --------------------------------------------------------
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
 
       - name: Install Helm
         uses: azure/setup-helm@v4
 
+      # --------------------------------------------------------
+      # KUBECONFIG
+      # --------------------------------------------------------
       - name: Configure kubeconfig
         run: |
+
+          set -euo pipefail
 
           aws eks update-kubeconfig \
             --name "$EKS_CLUSTER_NAME" \
             --region "$AWS_REGION"
 
+
       # --------------------------------------------------------
-      # Namespace
+      # NAMESPACE
       # --------------------------------------------------------
       - name: Create namespace
         run: |
@@ -674,13 +866,16 @@ jobs:
             >/dev/null 2>&1 \
             || kubectl create namespace "$NAMESPACE"
 
+
       # --------------------------------------------------------
-      # Check ECR images
+      # ECR IMAGE CHECK
       # --------------------------------------------------------
-      - name: Check ECR images
+      - name: Verify ECR images
         run: |
 
           set -euo pipefail
+
+          echo "Checking frontend image..."
 
           aws ecr describe-images \
             --repository-name three-tier-frontend \
@@ -688,13 +883,17 @@ jobs:
             --region "$AWS_REGION" \
             >/dev/null
 
+
+          echo "Checking backend image..."
+
           aws ecr describe-images \
             --repository-name three-tier-backend \
             --image-ids imageTag="${{ inputs.image_tag }}" \
             --region "$AWS_REGION" \
             >/dev/null
 
-          echo "ECR images found."
+
+          echo "ECR images exist."
 
 
       # ========================================================
@@ -722,6 +921,7 @@ jobs:
             --wait \
             --timeout 15m
 
+          echo ""
           echo "Helm deployment successful."
 
 
@@ -730,6 +930,10 @@ jobs:
       # ========================================================
       - name: Wait for frontend
         run: |
+
+          set -euo pipefail
+
+          echo "Waiting for frontend..."
 
           kubectl rollout status \
             deployment/"$RELEASE_NAME-frontend" \
@@ -744,6 +948,10 @@ jobs:
       # ========================================================
       - name: Wait for backend
         run: |
+
+          set -euo pipefail
+
+          echo "Waiting for backend..."
 
           kubectl rollout status \
             deployment/"$RELEASE_NAME-backend" \
@@ -761,9 +969,7 @@ jobs:
 
           set -euo pipefail
 
-          echo "=========================================="
-          echo "POSTGRESQL"
-          echo "=========================================="
+          echo "Waiting for PostgreSQL..."
 
           kubectl rollout status \
             statefulset/"$RELEASE_NAME-postgres" \
@@ -774,9 +980,42 @@ jobs:
 
 
       # ========================================================
-      # FINAL STATUS
+      # DATABASE PVC
       # ========================================================
-      - name: Deployment summary
+      - name: Verify PostgreSQL PVC
+        run: |
+
+          set -euo pipefail
+
+          PVC_NAME="data-${RELEASE_NAME}-postgres-0"
+
+          echo "Checking PVC:"
+          echo "$PVC_NAME"
+
+          STATUS=$(kubectl get pvc "$PVC_NAME" \
+            -n "$NAMESPACE" \
+            -o jsonpath='{.status.phase}')
+
+          echo "PVC status: $STATUS"
+
+          if [ "$STATUS" != "Bound" ]; then
+
+            echo "ERROR: PostgreSQL PVC is not Bound."
+
+            kubectl describe pvc "$PVC_NAME" \
+              -n "$NAMESPACE"
+
+            exit 1
+
+          fi
+
+          echo "PostgreSQL PVC is Bound."
+
+
+      # ========================================================
+      # FINAL SUMMARY
+      # ========================================================
+      - name: Final deployment summary
         run: |
 
           set -euo pipefail
@@ -787,105 +1026,183 @@ jobs:
           echo "=================================================="
 
           echo ""
-          echo "EKS:"
+          echo "EKS CLUSTER"
+          echo "------------------------------------------"
+
           aws eks describe-cluster \
             --name "$EKS_CLUSTER_NAME" \
             --region "$AWS_REGION" \
             --query 'cluster.{Name:name,Status:status,Version:version}' \
             --output table
 
+
           echo ""
-          echo "Deployments:"
+          echo "DEPLOYMENTS"
+          echo "------------------------------------------"
+
           kubectl get deployments \
             -n "$NAMESPACE"
 
+
           echo ""
-          echo "StatefulSets:"
+          echo "STATEFULSETS"
+          echo "------------------------------------------"
+
           kubectl get statefulsets \
             -n "$NAMESPACE"
 
+
           echo ""
-          echo "Pods:"
+          echo "PODS"
+          echo "------------------------------------------"
+
           kubectl get pods \
             -n "$NAMESPACE" \
             -o wide
 
+
           echo ""
-          echo "Services:"
+          echo "SERVICES"
+          echo "------------------------------------------"
+
           kubectl get services \
             -n "$NAMESPACE"
 
+
           echo ""
-          echo "PVC:"
+          echo "PVC"
+          echo "------------------------------------------"
+
           kubectl get pvc \
             -n "$NAMESPACE"
 
+
           echo ""
-          echo "PV:"
+          echo "PV"
+          echo "------------------------------------------"
+
           kubectl get pv
 
-          echo ""
-          echo "StorageClass:"
-          kubectl get storageclass
 
           echo ""
-          echo "EBS CSI:"
+          echo "STORAGE CLASS"
+          echo "------------------------------------------"
+
+          kubectl get storageclass
+
+
+          echo ""
+          echo "EBS CSI"
+          echo "------------------------------------------"
+
           kubectl get pods \
             -n kube-system \
             -l app.kubernetes.io/name=aws-ebs-csi-driver \
-            -o wide || true
+            -o wide \
+            || true
+
+
+          echo ""
+          echo "AWS LOAD BALANCER CONTROLLER"
+          echo "------------------------------------------"
+
+          kubectl get pods \
+            -n kube-system \
+            -l app.kubernetes.io/name=aws-load-balancer-controller \
+            -o wide \
+            || true
+
 
           echo ""
           echo "=================================================="
-          echo "       APPLICATION DEPLOYMENT SUCCESSFUL"
+          echo "        APPLICATION DEPLOYMENT SUCCESSFUL"
           echo "=================================================="
+
+          echo ""
+          echo "Frontend : READY"
+          echo "Backend  : READY"
+          echo "Database : READY"
+          echo "Storage  : READY"
+
+          echo ""
+          echo "Image tag:"
+          echo "${{ inputs.image_tag }}"
 
 
       # ========================================================
-      # DEBUG ON FAILURE
+      # DEBUG
       # ========================================================
       - name: Debug on failure
         if: failure()
         run: |
 
-          echo "=========================================="
-          echo "DEPLOYMENT DEBUG"
-          echo "=========================================="
+          echo ""
+          echo "=================================================="
+          echo "              DEPLOYMENT DEBUG"
+          echo "=================================================="
+
 
           echo ""
-          echo "Application pods:"
+          echo "APPLICATION PODS"
           kubectl get pods \
             -n "$NAMESPACE" \
-            -o wide || true
+            -o wide \
+            || true
+
 
           echo ""
-          echo "PVC:"
+          echo "PVC"
           kubectl get pvc \
-            -n "$NAMESPACE" || true
+            -n "$NAMESPACE" \
+            || true
+
 
           echo ""
-          echo "PV:"
-          kubectl get pv || true
+          echo "PV"
+          kubectl get pv \
+            || true
+
 
           echo ""
-          echo "StorageClass:"
-          kubectl get storageclass || true
+          echo "STORAGE CLASS"
+          kubectl get storageclass \
+            || true
+
 
           echo ""
-          echo "Events:"
+          echo "KUBERNETES EVENTS"
+
           kubectl get events \
             -n "$NAMESPACE" \
-            --sort-by='.lastTimestamp' || true
+            --sort-by='.lastTimestamp' \
+            || true
+
 
           echo ""
-          echo "EBS CSI:"
+          echo "EBS CSI PODS"
+
           kubectl get pods \
             -n kube-system \
             -l app.kubernetes.io/name=aws-ebs-csi-driver \
-            -o wide || true
+            -o wide \
+            || true
+
 
           echo ""
-          echo "PostgreSQL:"
+          echo "EBS CSI LOGS"
+
+          kubectl logs \
+            -n kube-system \
+            -l app.kubernetes.io/name=aws-ebs-csi-driver \
+            --all-containers \
+            --tail=100 \
+            || true
+
+
+          echo ""
+          echo "POSTGRESQL"
+
           kubectl describe pod \
             "$RELEASE_NAME-postgres-0" \
-            -n "$NAMESPACE" || true
+            -n "$NAMESPACE" \
+            || true
