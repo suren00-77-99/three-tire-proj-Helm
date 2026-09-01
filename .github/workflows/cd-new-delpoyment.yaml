@@ -376,13 +376,19 @@ jobs:
           echo "EBS CSI"
           echo "=========================================="
 
-          if [ -z "$AWS_EBS_CSI_ROLE_ARN" ]; then
+          if [ -z "${AWS_EBS_CSI_ROLE_ARN:-}" ]; then
 
             echo "ERROR: AWS_EBS_CSI_ROLE_ARN is not configured."
+            echo ""
+            echo "Add the GitHub Actions repository variable:"
+            echo "AWS_EBS_CSI_ROLE_ARN"
 
             exit 1
 
           fi
+
+          echo "EBS CSI IAM role is configured."
+
 
           echo "EBS CSI IAM role configured."
 
