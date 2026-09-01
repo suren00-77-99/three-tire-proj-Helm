@@ -79,19 +79,16 @@ spec:
             capabilities:
               drop:
                 - ALL
-
           readinessProbe:
             exec:
               command:
                 - sh
                 - -c
                 - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
-
             initialDelaySeconds: 10
             periodSeconds: 5
             timeoutSeconds: 5
             failureThreshold: 6
-
           livenessProbe:
             exec:
               command:
@@ -103,33 +100,24 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 6
-
           resources:
             requests:
               cpu: 50m
               memory: 128Mi
-
             limits:
               cpu: 500m
               memory: 512Mi
-
           volumeMounts:
-
             # MUST match volumeClaimTemplates.metadata.name
             - name: data
               mountPath: /var/lib/postgresql/data
-
   volumeClaimTemplates:
-
     - metadata:
         name: data
-
       spec:
         accessModes:
           - {{ .Values.database.storage.accessMode }}
-
         storageClassName: {{ .Values.database.storageClass.name }}
-
         resources:
           requests:
             storage: {{ .Values.database.storage.size }}
