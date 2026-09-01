@@ -19,6 +19,8 @@ spec:
         app.kubernetes.io/component: frontend
     spec:
       securityContext:
+        runAsNonRoot: true
+        runAsUser: 101  
         seccompProfile:
           type: RuntimeDefault
       containers:

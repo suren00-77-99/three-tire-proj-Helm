@@ -83,12 +83,9 @@ database:
   # PostgreSQL persistent storage
   # ----------------------------------------------------------
   storage:
-
     size: 2Gi
-
     # Empty means use the chart/default StorageClass logic.
     storageClassName: ""
-
     # PostgreSQL needs block storage with RWO.
     accessMode: ReadWriteOnce
 
@@ -99,11 +96,8 @@ database:
   storageClass:
 
     create: true
-
     name: ebs-gp3
-
     type: gp3
-
     fsType: ext4
 
 
