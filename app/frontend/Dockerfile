@@ -1,16 +1,17 @@
 FROM nginx:1.29-alpine
 
-# Update Alpine packages
 RUN apk upgrade --no-cache
 
-# Copy nginx configuration
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# Copy frontend application
 COPY src/index.html /usr/share/nginx/html/index.html
 
-# nginx user in the official image uses UID 101
-USER 101
+RUN chown -R nginx:nginx /usr/share/nginx/html \
+    && chown -R nginx:nginx /var/cache/nginx \
+    && touch /var/run/nginx.pid \
+    && chown nginx:nginx /var/run/nginx.pid
+
+USER nginx
 
 EXPOSE 8080
 
