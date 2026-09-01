@@ -101,18 +101,15 @@ spec:
               mountPath: /var/lib/postgresql/data
 
   volumeClaimTemplates:
+  - metadata:
+      name: data
 
-    - metadata:
-        name: data
+    spec:
+      accessModes:
+        - {{ .Values.database.storage.accessMode }}
 
-      spec:
+      storageClassName: {{ .Values.database.storageClass.name }}
 
-        accessModes:
-          - {{ .Values.database.storage.accessMode }}
-
-        storageClassName: {{ .Values.database.storageClass.name }}
-
-        resources:
-
-          requests:
-            storage: {{ .Values.database.storage.size }}
+      resources:
+        requests:
+          storage: {{ .Values.database.storage.size }}

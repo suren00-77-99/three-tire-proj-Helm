@@ -13,7 +13,7 @@ frontend:
   image:
     repository: "322686612450.dkr.ecr.ap-south-1.amazonaws.com/three-tier-frontend"
     tag: "latest"
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
 
   service:
     type: LoadBalancer
@@ -85,7 +85,6 @@ database:
   storage:
     size: 2Gi
     # Empty means use the chart/default StorageClass logic.
-    storageClassName: ""
     # PostgreSQL needs block storage with RWO.
     accessMode: ReadWriteOnce
 
